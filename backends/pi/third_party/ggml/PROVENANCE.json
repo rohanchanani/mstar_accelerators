@@ -1,0 +1,18 @@
+{
+  "upstream_repository": "https://github.com/ggml-org/llama.cpp",
+  "upstream_revision": "1b29621bacc6a446bd523fc790316a24a06e886f",
+  "source_snapshot": "pi-backend-packet-2026-10-21-r2/sources/pi-installed-ggml/ggml",
+  "baseline_files": 1443,
+  "baseline_bytes": 23128493,
+  "baseline_changes": "The supplied actual Pi snapshot includes the r2 descriptor-storage-binding limit repair; the preserved patch records its difference from the pinned upstream file. No provisional Pi factory is used.",
+  "baseline_manifest": "BASELINE_MANIFEST.json",
+  "upstream_delta": "R2_STORAGE_BINDING.patch",
+  "stage2_changes": "STAGE2_PROVIDER.patch",
+  "graph_candidate_changes": "The repository diff from the accepted Stage 2 baseline records the managed multi-operation graph provider, shape-only pipeline preparation, explicit descriptor-only im2col, 256-invocation graph kernels, I32/I64 storage conversion, argmax tie handling and one-tail completion. STAGE2_PROVIDER.patch remains the historical Stage 2 delta.",
+  "license": {
+    "url": "https://raw.githubusercontent.com/ggml-org/llama.cpp/1b29621bacc6a446bd523fc790316a24a06e886f/LICENSE",
+    "sha256": "94f29bbed6a22c35b992c5c6ebf0e7c92f13b836b90f36f461c9cf2f0f1d010d",
+    "bytes": 1078
+  },
+  "binary_provenance": "All candidate ggml libraries and shaders must be freshly built from this tree. Prior installed binaries are not reused; earlier source/binary correspondence and target receipts remain separate evidence."
+}

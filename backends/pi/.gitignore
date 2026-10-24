@@ -1,0 +1,15 @@
+/build/
+/build-*/
+/.venv/
+/.pytest_cache/
+__pycache__/
+*.py[cod]
+*.so
+*.a
+*.o
+*.egg-info/
+/torch/build/
+/torch/dist/
+/torch/mstar_pi/transfer.spv
+/runs/
+

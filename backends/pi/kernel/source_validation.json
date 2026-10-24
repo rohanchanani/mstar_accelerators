@@ -1,0 +1,16 @@
+{
+  "source_package": "1:6.18.50-1+rpt1",
+  "full_kernel_build": false,
+  "hardware_test": false,
+  "exact_source_files": 8,
+  "structural_checks": 20,
+  "extracted_function_tests": {
+    "cases": 27,
+    "status": "PASS"
+  },
+  "sanitizers": [
+    "address (leak detection disabled for sandbox)",
+    "undefined"
+  ],
+  "status": "PASS (source and host branch tests only)"
+}

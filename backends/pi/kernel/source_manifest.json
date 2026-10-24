@@ -1,0 +1,40 @@
+{
+  "source_package": "1:6.18.50-1+rpt1",
+  "contract_version": 1,
+  "contract_param": "0x50490001",
+  "status_param": "0x50490002",
+  "files": {
+    "drivers/gpu/drm/v3d/v3d_drv.h": {
+      "before_sha256": "6e7016590586279791af882e2cd99b593b7ab7334bed3b306ad61b2e8e949d47",
+      "after_sha256": "ae1511743f7ee5669d9e681310ca345d9848edf85bb461fd833110381c575f02"
+    },
+    "include/uapi/drm/v3d_drm.h": {
+      "before_sha256": "eafcaa1f22beedd040baa27912b506732bc32fed01b23a4b581148a267afbac3",
+      "after_sha256": "753337d90bb4a38680cd3b4a278e3bda1b16a8b134ef75310c5661a8dd620b76"
+    },
+    "drivers/gpu/drm/v3d/v3d_drv.c": {
+      "before_sha256": "46fb28cd17ee1ed82c2e8539039acb3e76bc95be40b94cce5eb40af3abd5cb92",
+      "after_sha256": "657dc206dabb4b04a73902a5044f7c2c736e52f77cbe4678417ed995931c4bfb"
+    },
+    "drivers/gpu/drm/v3d/v3d_submit.c": {
+      "before_sha256": "7188c235d8175a3dab2f79997706f43e8ed352bf6caa9def51c4221cfbb2bcca",
+      "after_sha256": "d6de1fca63f7778bdf7f1023dd79f4f07df8eabfa005d6cb0ffa440f4f7ae027"
+    },
+    "drivers/gpu/drm/v3d/v3d_gem.c": {
+      "before_sha256": "19882017967efab0106b9aea1c7122ffe043c5b41b2a6776e0033de56021088d",
+      "after_sha256": "3072247d138aeff33d8e9b071ee2faeb8cf9249763ae93ce6ceafc82f46d6cbd"
+    },
+    "drivers/gpu/drm/v3d/v3d_power.c": {
+      "before_sha256": "65455b509b8d374fb802d91b835cd825f767189afb37a2f2415d9853ee339cba",
+      "after_sha256": "457e5ca89e9e4d6423a0d802cbf59bba9c69790d99c435c2987f15d0a0dfaf07"
+    },
+    "drivers/gpu/drm/v3d/v3d_sched.c": {
+      "before_sha256": "db372d3e01c08d98fa3ae4a979eacb1a51b5a980b88f235aa9c9d9b3b86b47ae",
+      "after_sha256": "0d967ecef920c73cc634ff34e804d304eb4641d2669b8df634f58746cd57962e"
+    },
+    "drivers/gpu/drm/v3d/v3d_irq.c": {
+      "before_sha256": "870d3a2daa2cb524d189a0d9d53a03fc161bddce387e3b9bff55d1ea44494e31",
+      "after_sha256": "a9825c0b26f9b34de45fe478890ae8b49c863d46d1f5257f341d27e696a9ec05"
+    }
+  }
+}

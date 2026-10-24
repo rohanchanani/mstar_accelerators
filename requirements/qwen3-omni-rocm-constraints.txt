@@ -1,0 +1,11 @@
+# AMD execution stack from mstar 678f59d6adb3d892263f2ba30fcf7b28145abf2e.
+torch==2.12.1+rocm7.2
+torchvision==0.27.1+rocm7.2
+torchaudio==2.11.0+rocm7.2
+triton-rocm==3.7.1
+pybind11==3.0.4
+flydsl==0.3.4.1
+# Packed HF encoder attention is verified against this 5.x interface.
+transformers==5.10.2
+numpy==2.2.6
+qwen-omni-utils==0.0.9

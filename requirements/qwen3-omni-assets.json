@@ -1,0 +1,122 @@
+{
+  "model": "Qwen/Qwen3-Omni-30B-A3B-Instruct",
+  "revision": "26291f793822fb6be9555850f06dfe95f2d7e695",
+  "files": [
+    {
+      "path": "chat_template.json",
+      "bytes": 6772,
+      "git_blob_sha1": "339ecf8a9f1ac161a9b59f833c85e6d92146b78c"
+    },
+    {
+      "path": "config.json",
+      "bytes": 13671,
+      "git_blob_sha1": "18c714a7fa2d8881e8e1441ec3759b6338c9c5ea"
+    },
+    {
+      "path": "generation_config.json",
+      "bytes": 146,
+      "git_blob_sha1": "59f9fe8f7db6b35dc244fc7eb52743b31533bbb5"
+    },
+    {
+      "path": "merges.txt",
+      "bytes": 1671839,
+      "git_blob_sha1": "20024bfe7c83998e9aeaf98a0cd6a2ce6306c2f0"
+    },
+    {
+      "path": "model-00001-of-00015.safetensors",
+      "bytes": 4997899632,
+      "sha256": "f95d142b727fbd0698f0ed9478e222d4f29467df855e21862e46bd1401049065"
+    },
+    {
+      "path": "model-00002-of-00015.safetensors",
+      "bytes": 4997754216,
+      "sha256": "320c1f31f7ddc4efd2501891590eca2c481ce4eca3db33d70ebbb637dae85764"
+    },
+    {
+      "path": "model-00003-of-00015.safetensors",
+      "bytes": 4997754216,
+      "sha256": "306f06b05ef032f1fa51eb62e72c3432324e7a084fa0d15ed17ff856adffcf33"
+    },
+    {
+      "path": "model-00004-of-00015.safetensors",
+      "bytes": 4997755648,
+      "sha256": "4cb551f433bfb4d83a5843e433e74688d71a96eeb1b62217b37d719026d559b5"
+    },
+    {
+      "path": "model-00005-of-00015.safetensors",
+      "bytes": 4997755792,
+      "sha256": "8aec5e8cc0e0b179a81f690af31a1149238f4b1d18ac60e3f690020fdf7d915f"
+    },
+    {
+      "path": "model-00006-of-00015.safetensors",
+      "bytes": 4997755792,
+      "sha256": "8ff40a3d9e9c59a35a10257c1c5b216f472e6a102a4d6059bd31183eee03cb4c"
+    },
+    {
+      "path": "model-00007-of-00015.safetensors",
+      "bytes": 4997755792,
+      "sha256": "f6d84cc1d47178850f9ba1fe9c01f45ee63d9a8b9975f92821ee2b4a0387860b"
+    },
+    {
+      "path": "model-00008-of-00015.safetensors",
+      "bytes": 4997755792,
+      "sha256": "9f369ccdc9d2d2a55df794005b23cdbce44494a72e4a0069a150ae471cfea720"
+    },
+    {
+      "path": "model-00009-of-00015.safetensors",
+      "bytes": 4997755792,
+      "sha256": "980f754b21c4b20f36e02d184b792f5625f7c9d24b8a5c9da94287cf3cfde11b"
+    },
+    {
+      "path": "model-00010-of-00015.safetensors",
+      "bytes": 4997755792,
+      "sha256": "5c5a798376321d74df2eb3f235e1c8c68669f09b0c753b5698a16e681204d808"
+    },
+    {
+      "path": "model-00011-of-00015.safetensors",
+      "bytes": 4997755792,
+      "sha256": "6f7c051bd391c89279b43e7342ff4a243ad2ba2144f4aa62233fd2b02d72fce0"
+    },
+    {
+      "path": "model-00012-of-00015.safetensors",
+      "bytes": 4997755792,
+      "sha256": "a8b09a9367cd31ebf928e87b9eaf002492379d9d21d352b480854c2fbe6d9978"
+    },
+    {
+      "path": "model-00013-of-00015.safetensors",
+      "bytes": 4999771808,
+      "sha256": "d9b7441c3a33e066d109cd6338e74ed680de9aa407d4df66eba5cb3c15c6d738"
+    },
+    {
+      "path": "model-00014-of-00015.safetensors",
+      "bytes": 4996618552,
+      "sha256": "73f09f187ff7b469a8937b39b8ac772e539e0d61311526c345558c5e6a6eb09a"
+    },
+    {
+      "path": "model-00015-of-00015.safetensors",
+      "bytes": 553698794,
+      "sha256": "68880d566a50643807a4e73f5227c4f468bb31532925ed5fae78a51bdd39492a"
+    },
+    {
+      "path": "model.safetensors.index.json",
+      "bytes": 2727350,
+      "git_blob_sha1": "037226d18d29071d0ef1ca6b2a85c43be5ce61aa"
+    },
+    {
+      "path": "preprocessor_config.json",
+      "bytes": 603,
+      "git_blob_sha1": "7df5b45379044a680218cb2b7ed4d01a6633f537"
+    },
+    {
+      "path": "tokenizer_config.json",
+      "bytes": 7344,
+      "git_blob_sha1": "6ff9fd60cc623bb54bbd603cbd418c97a11528d7"
+    },
+    {
+      "path": "vocab.json",
+      "bytes": 2776833,
+      "git_blob_sha1": "4783fe10ac3adce15ac8f358ef5462739852c569"
+    }
+  ],
+  "source": "https://huggingface.co/api/models/Qwen/Qwen3-Omni-30B-A3B-Instruct/revision/26291f793822fb6be9555850f06dfe95f2d7e695?blobs=true"
+}

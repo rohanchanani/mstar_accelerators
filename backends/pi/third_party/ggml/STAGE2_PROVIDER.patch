@@ -1,0 +1,1213 @@
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -339,6 +339,7 @@
+     include/ggml-virtgpu.h
+     include/ggml-sycl.h
+     include/ggml-vulkan.h
++    include/ggml-vulkan-managed.h
+     include/ggml-webgpu.h
+     include/ggml-zendnn.h
+     include/ggml-openvino.h
+--- /dev/null
++++ b/include/ggml-vulkan-managed.h
+@@ -0,0 +1,84 @@
++#pragma once
++
++#include "ggml-backend.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++// External-storage, externally ordered execution. This is a deliberately bounded
++// provider surface, not an alternative ggml scheduler or a tensor CPU fallback.
++typedef struct ggml_vk_managed * ggml_vk_managed_t;
++typedef struct ggml_vk_managed_tail * ggml_vk_managed_tail_t;
++typedef void (*ggml_vk_managed_before_accept)(void * user);
++
++// All fallible entry points report errors through this thread-local string.
++// Integer status: 0 success, 1 not ready/timeout (tail only), -1 error.
++GGML_BACKEND_API const char * ggml_vk_managed_last_error(void);
++// True for a device-loss result or uncertain allocation failure (which could
++// mask construction of a Vulkan-Hpp device-loss diagnostic). The consumer must
++// poison its backend even during preparation/import before the new submission.
++GGML_BACKEND_API bool ggml_vk_managed_error_is_fatal(void);
++
++// Selects the physical device by its actual DRM render major/minor. The ggml
++// logical device remains ggml-owned. Each handle's lifecycle is externally
++// serialized; distinct handles have distinct command/descriptor state and may
++// be in flight together. Shared ggml host metadata operations are internally
++// serialized, without GPU waits. Managed methods must not be reentered by a
++// callback. Concurrent ordinary/unmanaged ggml use of the shared device is not
++// part of this provider's supported surface.
++GGML_BACKEND_API ggml_vk_managed_t ggml_vk_managed_create(uint32_t drm_major, uint32_t drm_minor);
++// Borrowed inspection handle. Do not free it or call ordinary ggml execution,
++// synchronization, or transfer entry points on it; use this managed interface.
++GGML_BACKEND_API ggml_backend_t ggml_vk_managed_backend(ggml_vk_managed_t managed);
++// Fails, without destroying anything, if an invocation has not been retired.
++GGML_BACKEND_API int ggml_vk_managed_destroy(ggml_vk_managed_t managed);
++
++// fd is borrowed. A duplicate is imported by Vulkan. The buffer wraps the whole
++// canonical BO; tensor views bind offsets within logical_bytes. backing_bytes is
++// the real allocation size, independently checked against fd and Vulkan facts.
++// The caller owns the returned ggml buffer and must retain it through retirement.
++// No mapped-pointer import, host get/set, or implicit transfer is provided.
++// The initial matrix program requires each tensor's byte offset to be a multiple
++// of the physical device's minStorageBufferOffsetAlignment (32 on the observed
++// Pi 5). This is checked, not repaired by an implicit copy.
++GGML_BACKEND_API ggml_backend_buffer_t ggml_vk_managed_import_dma_buf(
++        ggml_vk_managed_t managed, int fd, uint64_t logical_bytes, uint64_t backing_bytes);
++
++// Shape-only preparation: graph storage may still be unbound. The initial
++// admitted program is exactly one contiguous 2-D F32 MUL_MAT, with F32 inputs,
++// accumulation, and output. Split-K and internal conversion are disabled, so
++// this program requires zero scratch. Pipelines are prepared here. Future
++// programs must add an explicit admission/preparation consumer.
++GGML_BACKEND_API int ggml_vk_managed_prepare(ggml_vk_managed_t managed, struct ggml_cgraph * graph);
++
++// All tensors must now be bound to managed imports. Genuine ggml graph execution
++// records commands before any GPU submission. The supplied incoming sync_file
++// is borrowed (-1 means already satisfied). Foreign acquire, every graph batch,
++// and foreign release are submitted on the one admitted compute queue. Transfer
++// queues, host continuations, indirect dispatch, and unaccounted work reject.
++//
++// before_accept MUST be noexcept and mark the caller's submission scope before
++// the first possibly accepted vkQueueSubmit. On success, *out_fd is an owned
++// sync_file (-1 can mean already signaled), and *out_tail is independent from
++// the mutable graph context. On a post-acceptance error, *out_tail is still set;
++// retain it, the managed context, graph, and all imports under failure containment.
++// A failure before the callback leaves *out_tail=nullptr and *out_fd=-1.
++GGML_BACKEND_API int ggml_vk_managed_submit(
++        ggml_vk_managed_t managed, struct ggml_cgraph * graph, int dependency_fd,
++        ggml_vk_managed_before_accept before_accept, void * user,
++        ggml_vk_managed_tail_t * out_tail, int * out_fd);
++
++// Must be called only after the runtime establishes successful completion and
++// native health. Checks the independent tail again, then resets reusable graph
++// resources. This does not invalidate old event/tail snapshots.
++GGML_BACKEND_API int ggml_vk_managed_retire(ggml_vk_managed_t managed);
++GGML_BACKEND_API int ggml_vk_managed_tail_query(ggml_vk_managed_tail_t tail);
++GGML_BACKEND_API int ggml_vk_managed_tail_wait(ggml_vk_managed_tail_t tail, uint64_t timeout_ns);
++// Does not wait or query. Refuses destruction until query/wait/retire has
++// observed successful physical completion; inactive teardown is nonfallible.
++GGML_BACKEND_API int ggml_vk_managed_tail_destroy(ggml_vk_managed_tail_t tail);
++
++#ifdef __cplusplus
++}
++#endif
+--- a/src/ggml-vulkan/CMakeLists.txt
++++ b/src/ggml-vulkan/CMakeLists.txt
+@@ -61,13 +61,19 @@
+ 
+     ggml_add_backend_library(ggml-vulkan
+                              ggml-vulkan.cpp
++                             ggml-vulkan-managed.cpp
+                              ../../include/ggml-vulkan.h
++                             ../../include/ggml-vulkan-managed.h
+                              ggml-vulkan-types.h
+                              ggml-vulkan-push-constants.h
+                              ggml-vulkan-common.h
+                              ggml-vulkan-buffers.cpp
+                              ggml-vulkan-debug.cpp
+                             )
++
++    # Consume the discovered package's include directory. A global system
++    # installation previously hid this missing producer/consumer connection.
++    target_link_libraries(ggml-vulkan PRIVATE SPIRV-Headers::SPIRV-Headers)
+ 
+     # hide symbols, so dlclosed duplicate copies cannot interpose them
+     set_target_properties(ggml-vulkan PROPERTIES
+--- a/src/ggml-vulkan/ggml-vulkan-buffers.cpp
++++ b/src/ggml-vulkan/ggml-vulkan-buffers.cpp
+@@ -498,6 +498,7 @@
+ }
+ 
+ bool ggml_vk_buffer_write_2d_async(vk_context subctx, vk_buffer& dst, size_t offset, const void * src, size_t spitch, size_t dpitch, size_t width, size_t height, bool sync_staging) {
++    if (dst->managed_external) throw std::runtime_error("managed imports require externally ordered transfer providers");
+     VK_LOG_DEBUG("ggml_vk_buffer_write_2d_async(" << width << ", " << height << ")");
+     // Check if src is pinned memory
+     vk_buffer buf = nullptr;
+@@ -571,6 +572,7 @@
+ }
+ 
+ void ggml_vk_buffer_write_2d(vk_buffer& dst, size_t offset, const void * src, size_t spitch, size_t dpitch, size_t width, size_t height) {
++    if (dst->managed_external) throw std::runtime_error("managed imports cannot perform host writes");
+     VK_LOG_DEBUG("ggml_vk_buffer_write_2d(" << width << ", " << height << ")");
+     // Buffer is already mapped
+     if(dst->memory_property_flags & vk::MemoryPropertyFlagBits::eHostVisible) {
+@@ -613,6 +615,7 @@
+ }
+ 
+ bool ggml_vk_buffer_read_2d_async(vk_context subctx, vk_buffer& src, size_t offset, void * dst, size_t spitch, size_t dpitch, size_t width, size_t height, bool sync_staging) {
++    if (src->managed_external) throw std::runtime_error("managed imports require externally ordered transfer providers");
+     VK_LOG_DEBUG("ggml_vk_buffer_read_2d_async(offset=" << offset << ", width=" << width << ", height=" << height << ")");
+     GGML_ASSERT(width > 0);
+     GGML_ASSERT(height > 0);
+@@ -692,6 +695,7 @@
+ }
+ 
+ void ggml_vk_buffer_read_2d(vk_buffer& src, size_t offset, void * dst, size_t spitch, size_t dpitch, size_t width, size_t height) {
++    if (src->managed_external) throw std::runtime_error("managed imports cannot perform host reads");
+     VK_LOG_DEBUG("ggml_vk_buffer_read_2d(" << src->buffer << ", " << offset << ", " << width << ", " << height << ")");
+ 
+     // If the device is not an UMA device the memory is host-accessible through rebar. While writing
+@@ -753,6 +757,7 @@
+ }
+ 
+ void ggml_vk_buffer_copy_async(vk_context& ctx, vk_buffer& dst, size_t dst_offset, vk_buffer& src, size_t src_offset, size_t size) {
++    if (src->managed_external || dst->managed_external) throw std::runtime_error("managed imports cannot use generic Vulkan copies");
+     VK_LOG_DEBUG("ggml_vk_buffer_copy_async(" << size << ")");
+     // Make sure both buffers are on same device
+     GGML_ASSERT(src->device == dst->device);
+@@ -763,6 +768,7 @@
+ }
+ 
+ void ggml_vk_buffer_copy(vk_buffer& dst, size_t dst_offset, vk_buffer& src, size_t src_offset, size_t size) {
++    if (src->managed_external || dst->managed_external) throw std::runtime_error("managed imports cannot use generic Vulkan copies");
+     if (src->device == dst->device) {
+         std::lock_guard<std::recursive_mutex> guard(src->device->mutex);
+         VK_LOG_DEBUG("ggml_vk_buffer_copy(SINGLE_DEVICE, " << size << ")");
+@@ -788,6 +794,7 @@
+ }
+ 
+ void ggml_vk_buffer_memset_async(vk_context& ctx, vk_buffer& dst, size_t offset, uint32_t c, size_t size) {
++    if (dst->managed_external) throw std::runtime_error("managed imports cannot use generic Vulkan fills");
+     VK_LOG_DEBUG("ggml_vk_buffer_memset_async(" << offset << ", " << c << ", " << size << ")");
+ 
+     if (dst->memory_property_flags & vk::MemoryPropertyFlagBits::eHostVisible &&
+@@ -801,6 +808,7 @@
+ }
+ 
+ void ggml_vk_buffer_memset(vk_buffer& dst, size_t offset, uint32_t c, size_t size) {
++    if (dst->managed_external) throw std::runtime_error("managed imports cannot use generic Vulkan fills");
+     VK_LOG_DEBUG("ggml_vk_buffer_memset(" << offset << ", " << c << ", " << size << ")");
+ 
+     if (dst->memory_property_flags & vk::MemoryPropertyFlagBits::eHostVisible &&
+--- a/src/ggml-vulkan/ggml-vulkan-common.h
++++ b/src/ggml-vulkan/ggml-vulkan-common.h
+@@ -70,6 +70,10 @@
+ void ggml_pipeline_request_descriptor_sets(ggml_backend_vk_context *ctx, vk_pipeline& pipeline, uint32_t n);
+ void ggml_pipeline_allocate_descriptor_sets(ggml_backend_vk_context * ctx);
+ void ggml_vk_submit(vk_context& ctx, vk::Fence fence);
++bool ggml_vk_managed_record_submission(vk_context& ctx, vk::Fence fence);
++bool ggml_vk_managed_is_recording(const ggml_backend_vk_context * ctx);
++void ggml_vk_managed_prepare_pipeline(ggml_backend_vk_context * ctx, const ggml_tensor * node);
++void ggml_vk_graph_cleanup(ggml_backend_vk_context * ctx);
+ uint32_t ggml_vk_find_queue_family_index(std::vector<vk::QueueFamilyProperties>& queue_family_props, const vk::QueueFlags& required, const vk::QueueFlags& avoid, int32_t compute_index, uint32_t min_num_queues);
+ std::unique_ptr<vk_queue> ggml_vk_create_queue(vk_device& device, uint32_t queue_family_index, uint32_t queue_index, vk::PipelineStageFlags&& stage_flags, bool transfer_only);
+ std::unique_ptr<vk_queue> ggml_vk_create_aliased_queue(vk_device& device, const std::unique_ptr<vk_queue>& source);
+@@ -263,9 +267,34 @@
+ 
+ template <typename T>
+ inline void ggml_vk_dispatch_pipeline(ggml_backend_vk_context* ctx, vk_context& subctx, vk_pipeline& pipeline, std::initializer_list<vk::DescriptorBufferInfo> const& descriptor_buffer_infos, const T &push_constants, std::array<uint32_t, 3> elements) {
++    if (ctx->managed_external && (!pipeline || !pipeline->wg_denoms[0] || !pipeline->wg_denoms[1] || !pipeline->wg_denoms[2])) {
++        throw std::runtime_error("managed graph selected an invalid pipeline");
++    }
+     const uint32_t wg0 = CEIL_DIV(elements[0], pipeline->wg_denoms[0]);
+     const uint32_t wg1 = CEIL_DIV(elements[1], pipeline->wg_denoms[1]);
+     const uint32_t wg2 = CEIL_DIV(elements[2], pipeline->wg_denoms[2]);
++    if (ctx->managed_external &&
++        (wg0 > ctx->device->properties.limits.maxComputeWorkGroupCount[0] ||
++         wg1 > ctx->device->properties.limits.maxComputeWorkGroupCount[1] ||
++         wg2 > ctx->device->properties.limits.maxComputeWorkGroupCount[2] ||
++         ctx->descriptor_set_idx >= ctx->descriptor_sets.size() ||
++         descriptor_buffer_infos.size() > MAX_PARAMETER_COUNT ||
++         pipeline->parameter_count != descriptor_buffer_infos.size() ||
++         pipeline->push_constant_size != push_constant_size(push_constants))) {
++        throw std::runtime_error("managed graph exceeds its prepared dispatch/descriptor contract");
++    }
++    if (ctx->managed_external) {
++        // N-chunking shifts the B/D windows after initial tensor validation.
++        // Validate each actual descriptor, including its shifted byte offset,
++        // before recording. An unsupported device/shape rejects preaccept.
++        const auto & limits = ctx->device->properties.limits;
++        for (const auto & info : descriptor_buffer_infos) {
++            if (!info.buffer || info.offset % limits.minStorageBufferOffsetAlignment != 0 ||
++                !info.range || info.range > limits.maxStorageBufferRange) {
++                throw std::runtime_error("managed dispatch has an unsupported storage-buffer descriptor");
++            }
++        }
++    }
+     VK_LOG_DEBUG("ggml_vk_dispatch_pipeline(" << pipeline->name << ", {";
+     for (auto& buffer : descriptor_buffer_infos) {
+         std::cerr << "(" << buffer.buffer << ", " << buffer.offset << ", " << buffer.range << "), ";
+--- /dev/null
++++ b/src/ggml-vulkan/ggml-vulkan-managed.cpp
+@@ -0,0 +1,638 @@
++#include "ggml-vulkan-common.h"
++#include "ggml-vulkan-managed.h"
++
++#include <cstdio>
++#include <cstring>
++#include <atomic>
++#include <stdexcept>
++
++#ifdef __linux__
++#include <fcntl.h>
++#include <sys/stat.h>
++#include <unistd.h>
++#endif
++
++namespace {
++
++thread_local char managed_error[768] = {};
++thread_local bool managed_error_fatal = false;
++
++// ggml's instance, lazy pipeline maps and tile selectors are shared by managed
++// handles. Serialize host management/recording internally; do not depend on a
++// language binding's GIL. This mutex never encloses a GPU completion wait, and
++// immutable tails have their own independent query/wait/lifetime surface.
++std::mutex managed_metadata_mutex;
++
++template <class F> int checked(F && f) noexcept {
++    managed_error[0] = 0;
++    managed_error_fatal = false;
++    try {
++        return f();
++    } catch (const vk::DeviceLostError & e) {
++        managed_error_fatal = true;
++        std::snprintf(managed_error, sizeof(managed_error), "%s", e.what());
++    } catch (const std::bad_alloc &) {
++        // Vulkan-Hpp constructs exceptions after receiving VkResult. An OOM
++        // while formatting DEVICE_LOST must not turn into an ordinary rejection.
++        // Without reliable provenance, conservatively contain this context.
++        managed_error_fatal = true;
++        std::snprintf(managed_error, sizeof(managed_error), "managed provider allocation failure; device status may be unavailable");
++    } catch (const std::exception & e) {
++        std::snprintf(managed_error, sizeof(managed_error), "%s", e.what());
++    } catch (...) {
++        std::snprintf(managed_error, sizeof(managed_error), "unknown managed Vulkan failure");
++    }
++    return -1;
++}
++
++void require(bool condition, const char * message) {
++    if (!condition) throw std::runtime_error(message);
++}
++
++void check_vk(VkResult result, const char * operation) {
++    if (result == VK_ERROR_DEVICE_LOST) {
++        managed_error_fatal = true;
++        throw vk::DeviceLostError(operation);
++    }
++    if (result != VK_SUCCESS) {
++        char message[192];
++        std::snprintf(message, sizeof(message), "%s failed with VkResult %d", operation, int(result));
++        throw std::runtime_error(message);
++    }
++}
++
++struct tail_state {
++    vk_device device;
++    vk::Fence fence;
++    bool possibly_accepted = false;
++    std::atomic<bool> success_observed{false};
++
++    ~tail_state() {
++        if (fence) device->device.destroyFence(fence);
++    }
++};
++
++struct invocation {
++    vk_device device;
++    vk::CommandPool boundary_pool;
++    vk::Semaphore incoming;
++    vk::Semaphore outgoing;
++    std::shared_ptr<tail_state> tail;
++    std::vector<vk_buffer> buffers;
++
++    ~invocation() {
++        // The managed handle owns this until checked retirement. No destructor
++        // waits, calls a host continuation, or interprets failure as cancellation.
++        if (boundary_pool) device->device.destroyCommandPool(boundary_pool);
++        if (incoming) device->device.destroySemaphore(incoming);
++        if (outgoing) device->device.destroySemaphore(outgoing);
++    }
++};
++
++struct recording {
++    ggml_backend_vk_context * ctx;
++    std::vector<vk::CommandBuffer> commands;
++};
++
++thread_local recording * active_recording = nullptr;
++
++struct recording_scope {
++    explicit recording_scope(recording & value) {
++        require(!active_recording, "nested managed recording is unsupported");
++        active_recording = &value;
++    }
++    ~recording_scope() { active_recording = nullptr; }
++};
++
++struct shape {
++    uint64_t k = 0, m = 0, n = 0;
++    bool operator==(const shape & other) const {
++        return k == other.k && m == other.m && n == other.n;
++    }
++};
++
++struct imported {
++    std::weak_ptr<vk_buffer_struct> buffer;
++    uint64_t logical = 0, backing = 0;
++};
++
++using import_key = std::pair<uint64_t, uint64_t>;
++
++shape validate_graph(ggml_backend_vk_context * ctx, ggml_cgraph * graph) {
++    require(graph && graph->n_nodes == 1, "managed provider admits exactly one MUL_MAT node");
++    const auto * y = graph->nodes[0];
++    require(y && y->op == GGML_OP_MUL_MAT && y->src[0] && y->src[1], "managed graph is not MUL_MAT");
++    require((y->flags & GGML_TENSOR_FLAG_COMPUTE) != 0, "managed output is not marked for computation");
++    require(y->op_params[0] == GGML_PREC_F32 && y->op_params[3] == GGML_PREC_F32,
++            "managed MUL_MAT requires explicit F32 accumulator and source-1 precision");
++    for (int i = 2; i < GGML_MAX_SRC; ++i) require(!y->src[i], "managed MUL_MAT has an unexpected source");
++    for (const auto * t : std::array<const ggml_tensor *, 3>{y->src[0], y->src[1], y}) {
++        require(t->type == GGML_TYPE_F32 && ggml_is_contiguous(t), "managed tensors must be contiguous F32");
++        require(t->ne[0] > 0 && t->ne[1] > 0 && t->ne[2] == 1 && t->ne[3] == 1,
++                "managed tensors must be nonempty two-dimensional matrices");
++        require(uint64_t(t->ne[0]) <= UINT32_MAX && uint64_t(t->ne[1]) <= UINT32_MAX,
++                "managed dimensions exceed the shader index domain");
++        require(uint64_t(t->ne[0]) <= UINT64_MAX / uint64_t(t->ne[1]) / sizeof(float),
++                "managed tensor extent overflows");
++        const uint64_t size = uint64_t(t->ne[0]) * uint64_t(t->ne[1]) * sizeof(float);
++        require(size <= ctx->device->properties.limits.maxStorageBufferRange && size <= SIZE_MAX,
++                "managed tensor exceeds the supported storage-buffer range");
++        require(ggml_nbytes(t) == size, "managed tensor has an unexpected byte extent");
++    }
++    require(y->src[0]->ne[0] == y->src[1]->ne[0] && y->ne[0] == y->src[0]->ne[1] && y->ne[1] == y->src[1]->ne[1],
++            "managed MUL_MAT dimensions do not agree");
++    require(y->src[0]->op == GGML_OP_NONE && y->src[1]->op == GGML_OP_NONE,
++            "managed sources must already be resident leaves");
++    return {uint64_t(y->src[0]->ne[0]), uint64_t(y->ne[0]), uint64_t(y->ne[1])};
++}
++
++struct binding {
++    vk_buffer buffer;
++    uint64_t offset;
++    uint64_t size;
++};
++
++binding validate_binding(ggml_backend_vk_context * ctx, const ggml_tensor * t) {
++    require(t && t->data && t->buffer && ggml_backend_buffer_is_vk(t->buffer),
++            "managed tensor is not bound to a Vulkan buffer");
++    auto * bc = static_cast<ggml_backend_vk_buffer_context *>(t->buffer->context);
++    require(bc && bc->dev_buffer && bc->dev_buffer->managed_external && bc->dev_buffer->device == ctx->device,
++            "managed tensor does not reference an import on this ggml device");
++    const auto * base_tensor = t->view_src ? t->view_src : t;
++    const uintptr_t encoded = reinterpret_cast<uintptr_t>(base_tensor->data);
++    const uintptr_t base = reinterpret_cast<uintptr_t>(vk_ptr_base);
++    require(encoded >= base, "managed tensor has an invalid encoded buffer offset");
++    const uint64_t offset = uint64_t(encoded - base) + t->view_offs;
++    require(offset >= t->view_offs, "managed tensor view offset overflows");
++    const uint64_t size = ggml_nbytes(t);
++    require(offset <= bc->dev_buffer->size && size <= bc->dev_buffer->size - offset,
++            "managed tensor view exceeds its canonical allocation");
++    require(offset % ctx->device->properties.limits.minStorageBufferOffsetAlignment == 0,
++            "managed matrix view offset is not storage-buffer aligned");
++    return {bc->dev_buffer, offset, size};
++}
++
++bool overlaps(const binding & a, const binding & b) {
++    return a.buffer == b.buffer && a.offset < b.offset + b.size && b.offset < a.offset + a.size;
++}
++
++int query_tail(const std::shared_ptr<tail_state> & tail) {
++    require(tail && tail->possibly_accepted, "tail has no accepted submission");
++    const auto result = tail->device->device.getFenceStatus(tail->fence);
++    if (result == vk::Result::eNotReady) return 1;
++    check_vk(VkResult(result), "vkGetFenceStatus(managed)");
++    tail->success_observed.store(true, std::memory_order_release);
++    return 0;
++}
++
++#ifdef __linux__
++struct fd_owner {
++    int value = -1;
++    ~fd_owner() { if (value >= 0) close(value); }
++    int release() { const int result = value; value = -1; return result; }
++};
++
++int duplicate_fd(int fd) {
++    const int result = fcntl(fd, F_DUPFD_CLOEXEC, 0);
++    require(result >= 0, "could not duplicate external file descriptor");
++    return result;
++}
++#endif
++
++} // namespace
++
++struct ggml_vk_managed_tail {
++    std::shared_ptr<tail_state> state;
++};
++
++struct ggml_vk_managed {
++    ggml_backend_t backend = nullptr;
++    shape prepared;
++    bool prepared_valid = false;
++    bool broken = false;
++    std::map<import_key, imported> imports;
++    std::unique_ptr<invocation> active;
++};
++
++// Called at the actual ggml queue-submission boundary. The bounded managed
++// program has one queue and no internal semaphore protocol. Rejecting any new
++// path here happens before acceptance and requires a corresponding extension.
++bool ggml_vk_managed_record_submission(vk_context & ctx, vk::Fence fence) {
++    if (!active_recording) return false;
++    require(ctx && ctx->p == &active_recording->ctx->compute_cmd_pool,
++            "managed graph attempted another queue");
++    require(!fence, "managed graph attempted an internal completion fence");
++    require(ctx->in_memcpys.empty() && ctx->out_memcpys.empty() && ctx->memsets.empty(),
++            "managed graph contains deferred host work");
++    for (const auto & sequence : ctx->seqs) {
++        for (const auto & submission : sequence) {
++            require(submission.buffer && submission.wait_semaphores.empty() && submission.signal_semaphores.empty(),
++                    "managed graph attempted an unaccounted semaphore protocol");
++            active_recording->commands.push_back(submission.buffer->buf);
++        }
++    }
++    ctx->seqs.clear();
++    return true;
++}
++
++bool ggml_vk_managed_is_recording(const ggml_backend_vk_context * ctx) {
++    return active_recording && (!ctx || active_recording->ctx == ctx);
++}
++
++extern "C" const char * ggml_vk_managed_last_error(void) { return managed_error; }
++extern "C" bool ggml_vk_managed_error_is_fatal(void) { return managed_error_fatal; }
++
++extern "C" ggml_vk_managed_t ggml_vk_managed_create(uint32_t drm_major, uint32_t drm_minor) {
++    ggml_vk_managed_t result = nullptr;
++    checked([&] {
++        std::lock_guard<std::mutex> metadata_guard(managed_metadata_mutex);
++#if !defined(__linux__)
++        GGML_UNUSED(drm_major); GGML_UNUSED(drm_minor);
++        throw std::runtime_error("managed DMA-BUF provider requires Linux");
++#elif defined(GGML_VULKAN_CHECK_RESULTS) || defined(GGML_VULKAN_RUN_TESTS)
++        throw std::runtime_error("managed provider forbids ggml result-check/test execution builds");
++#else
++        ggml_vk_instance_init();
++        require(!vk_perf_logger_enabled && !vk_enable_sync_logger,
++                "managed provider forbids performance/query and synchronous logging modes");
++        const auto devices = vk_instance.instance.enumeratePhysicalDevices();
++        size_t selected = SIZE_MAX;
++        for (size_t index = 0; index < vk_instance.device_indices.size(); ++index) {
++            const auto physical = devices.at(vk_instance.device_indices[index]);
++            const auto extensions = physical.enumerateDeviceExtensionProperties();
++            const bool has_drm = std::any_of(extensions.begin(), extensions.end(), [](const auto & e) {
++                return strcmp(e.extensionName, VK_EXT_PHYSICAL_DEVICE_DRM_EXTENSION_NAME) == 0;
++            });
++            if (!has_drm) continue;
++            vk::PhysicalDeviceDrmPropertiesEXT drm;
++            vk::PhysicalDeviceProperties2 properties;
++            properties.pNext = &drm;
++            physical.getProperties2(&properties);
++            if (drm.hasRender && uint64_t(drm.renderMajor) == drm_major && uint64_t(drm.renderMinor) == drm_minor) {
++                require(selected == SIZE_MAX, "DRM identity matched more than one Vulkan physical device");
++                require(properties.properties.deviceType != vk::PhysicalDeviceType::eCpu,
++                        "managed provider rejects software Vulkan devices");
++                selected = index;
++            }
++        }
++        require(selected != SIZE_MAX, "no enumerated ggml Vulkan device matches the DRM render identity");
++        auto managed = std::make_unique<ggml_vk_managed>();
++        managed->backend = ggml_backend_vk_init(selected);
++        require(managed->backend, "ggml Vulkan backend construction failed");
++        auto * ctx = static_cast<ggml_backend_vk_context *>(managed->backend->context);
++        // Mark ownership immediately: even failed capability validation must
++        // use the inactive, nonwaiting teardown. No graph has been submitted.
++        ctx->managed_external = true;
++        // Ordinary ggml eagerly reserves and clears RMS scratch even for a
++        // pure matmul. This program has no RMS operation or scratch need.
++        ctx->prealloc_size_add_rms_partials = 0;
++        try {
++            require(ctx->device->managed_external_interop,
++                    "ggml device lacks DMA-BUF/SYNC_FD/FOREIGN interoperability");
++            require(ctx->device->support_async && !ctx->device->serialize_submissions,
++                    "managed provider requires asynchronous, unserialized ggml execution");
++            // Query the external semaphore contract, not just extension names.
++            vk::PhysicalDeviceExternalSemaphoreInfo external_info;
++            external_info.handleType = vk::ExternalSemaphoreHandleTypeFlagBits::eSyncFd;
++            const auto external = ctx->device->physical_device.getExternalSemaphoreProperties(external_info);
++            require(bool(external.externalSemaphoreFeatures & vk::ExternalSemaphoreFeatureFlagBits::eImportable) &&
++                    bool(external.externalSemaphoreFeatures & vk::ExternalSemaphoreFeatureFlagBits::eExportable),
++                    "SYNC_FD semaphore import/export is unsupported");
++        } catch (...) {
++            ggml_backend_free(managed->backend);
++            managed->backend = nullptr;
++            throw;
++        }
++        result = managed.release();
++#endif
++        return 0;
++    });
++    return result;
++}
++
++extern "C" ggml_backend_t ggml_vk_managed_backend(ggml_vk_managed_t managed) {
++    return managed ? managed->backend : nullptr;
++}
++
++extern "C" int ggml_vk_managed_destroy(ggml_vk_managed_t managed) {
++    return checked([&] {
++        std::lock_guard<std::mutex> metadata_guard(managed_metadata_mutex);
++        if (!managed) return 0;
++        require(!managed->active, "managed context still owns an unretired invocation");
++        ggml_backend_free(managed->backend);
++        managed->backend = nullptr;
++        delete managed;
++        return 0;
++    });
++}
++
++extern "C" ggml_backend_buffer_t ggml_vk_managed_import_dma_buf(
++        ggml_vk_managed_t managed, int fd, uint64_t logical_bytes, uint64_t backing_bytes) {
++    ggml_backend_buffer_t result = nullptr;
++    checked([&] {
++        std::lock_guard<std::mutex> metadata_guard(managed_metadata_mutex);
++#ifndef __linux__
++        GGML_UNUSED(managed); GGML_UNUSED(fd); GGML_UNUSED(logical_bytes); GGML_UNUSED(backing_bytes);
++        throw std::runtime_error("managed DMA-BUF provider requires Linux");
++#else
++        require(managed && !managed->broken && !managed->active, "managed context is not available for import");
++        for (auto entry = managed->imports.begin(); entry != managed->imports.end();) {
++            if (entry->second.buffer.expired()) entry = managed->imports.erase(entry);
++            else ++entry;
++        }
++        auto * ctx = static_cast<ggml_backend_vk_context *>(managed->backend->context);
++        const auto & device = ctx->device;
++        require(fd >= 0 && logical_bytes && logical_bytes <= backing_bytes && backing_bytes <= SIZE_MAX,
++                "invalid canonical DMA-BUF extents");
++        require(logical_bytes <= device->max_buffer_size, "canonical import exceeds device buffer-size limit");
++        struct stat identity {};
++        require(fstat(fd, &identity) == 0, "could not stat canonical DMA-BUF");
++        const off_t actual_size = lseek(fd, 0, SEEK_END);
++        require(actual_size >= 0 && uint64_t(actual_size) == backing_bytes, "DMA-BUF backing size does not match allocation metadata");
++        const import_key key{uint64_t(identity.st_dev), uint64_t(identity.st_ino)};
++        vk_buffer buffer;
++        auto found = managed->imports.find(key);
++        if (found != managed->imports.end()) {
++            buffer = found->second.buffer.lock();
++            if (buffer) require(found->second.logical == logical_bytes && found->second.backing == backing_bytes,
++                                "aliased DMA-BUF imports disagree about canonical extents");
++        }
++        if (!buffer) {
++            const vk::BufferUsageFlags usage = vk::BufferUsageFlagBits::eStorageBuffer;
++            vk::PhysicalDeviceExternalBufferInfo external_info;
++            external_info.usage = usage;
++            external_info.handleType = vk::ExternalMemoryHandleTypeFlagBits::eDmaBufEXT;
++            const auto external = device->physical_device.getExternalBufferProperties(external_info);
++            require(bool(external.externalMemoryProperties.externalMemoryFeatures & vk::ExternalMemoryFeatureFlagBits::eImportable),
++                    "storage-buffer DMA-BUF import is unsupported");
++            vk::ExternalMemoryBufferCreateInfo external_buffer;
++            external_buffer.handleTypes = vk::ExternalMemoryHandleTypeFlagBits::eDmaBufEXT;
++            vk::BufferCreateInfo buffer_info;
++            buffer_info.size = logical_bytes;
++            buffer_info.usage = usage;
++            buffer_info.sharingMode = vk::SharingMode::eExclusive;
++            buffer_info.pNext = &external_buffer;
++            auto imported_buffer = std::make_shared<vk_buffer_struct>();
++            imported_buffer->device = device;
++            // Establish the destructor's owner before any resource is created.
++            imported_buffer->size = logical_bytes;
++            imported_buffer->managed_external = true;
++            imported_buffer->buffer = device->device.createBuffer(buffer_info);
++            vk::MemoryDedicatedRequirements dedicated;
++            vk::MemoryRequirements2 requirements;
++            requirements.pNext = &dedicated;
++            vk::BufferMemoryRequirementsInfo2 requirements_info(imported_buffer->buffer);
++            device->device.getBufferMemoryRequirements2(&requirements_info, &requirements);
++            require(requirements.memoryRequirements.size <= backing_bytes && requirements.memoryRequirements.alignment != 0,
++                    "canonical BO cannot back this ggml Vulkan buffer");
++            const auto fd_properties = device->device.getMemoryFdPropertiesKHR(vk::ExternalMemoryHandleTypeFlagBits::eDmaBufEXT, fd);
++            const uint32_t types = requirements.memoryRequirements.memoryTypeBits & fd_properties.memoryTypeBits;
++            const auto memory = device->physical_device.getMemoryProperties();
++            uint32_t memory_type = UINT32_MAX;
++            for (uint32_t i = 0; i < memory.memoryTypeCount; ++i) {
++                if ((types & (1u << i)) && memory.memoryHeaps[memory.memoryTypes[i].heapIndex].size >= backing_bytes) {
++                    memory_type = i;
++                    if (memory.memoryTypes[i].propertyFlags & vk::MemoryPropertyFlagBits::eDeviceLocal) break;
++                }
++            }
++            require(memory_type != UINT32_MAX, "DMA-BUF and ggml buffer have no compatible memory type");
++            const bool dedicated_only = dedicated.requiresDedicatedAllocation ||
++                bool(external.externalMemoryProperties.externalMemoryFeatures & vk::ExternalMemoryFeatureFlagBits::eDedicatedOnly);
++            if (dedicated_only) require(backing_bytes == requirements.memoryRequirements.size,
++                                        "dedicated import size differs from the canonical BO size");
++            fd_owner owned{duplicate_fd(fd)};
++            vk::ImportMemoryFdInfoKHR import_info;
++            import_info.handleType = vk::ExternalMemoryHandleTypeFlagBits::eDmaBufEXT;
++            import_info.fd = owned.value;
++            vk::MemoryDedicatedAllocateInfo dedicated_info;
++            dedicated_info.buffer = imported_buffer->buffer;
++            if (dedicated_only) import_info.pNext = &dedicated_info;
++            vk::MemoryAllocateInfo allocation(backing_bytes, memory_type, &import_info);
++            imported_buffer->device_memory = device->device.allocateMemory(allocation);
++            owned.release(); // Vulkan owns the descriptor only after success.
++            device->device.bindBufferMemory(imported_buffer->buffer, imported_buffer->device_memory, 0);
++            imported_buffer->memory_property_flags = memory.memoryTypes[memory_type].propertyFlags;
++            device->memory_logger->log_allocation(imported_buffer, logical_bytes);
++            buffer = std::move(imported_buffer);
++            managed->imports[key] = {buffer, logical_bytes, backing_bytes};
++        }
++        const auto buft = ggml_backend_vk_buffer_type(device->idx);
++        std::string name = "VulkanManagedDMA_BUF";
++        auto bc = std::make_unique<ggml_backend_vk_buffer_context>(device, std::move(buffer), name);
++        result = ggml_backend_buffer_init(buft, ggml_backend_vk_buffer_interface, bc.get(), logical_bytes);
++        require(result, "could not create managed ggml backend buffer");
++        bc.release();
++#endif
++        return 0;
++    });
++    return result;
++}
++
++extern "C" int ggml_vk_managed_prepare(ggml_vk_managed_t managed, ggml_cgraph * graph) {
++    return checked([&] {
++        std::lock_guard<std::mutex> metadata_guard(managed_metadata_mutex);
++        require(managed && !managed->broken && !managed->active, "managed context is not available for preparation");
++        auto * ctx = static_cast<ggml_backend_vk_context *>(managed->backend->context);
++        const auto next = validate_graph(ctx, graph);
++        ggml_vk_managed_prepare_pipeline(ctx, graph->nodes[0]);
++        managed->prepared = next;
++        managed->prepared_valid = true;
++        return 0;
++    });
++}
++
++extern "C" int ggml_vk_managed_submit(
++        ggml_vk_managed_t managed, ggml_cgraph * graph, int dependency_fd,
++        ggml_vk_managed_before_accept before_accept, void * user,
++        ggml_vk_managed_tail_t * out_tail, int * out_fd) {
++    if (out_tail) *out_tail = nullptr;
++    if (out_fd) *out_fd = -1;
++    return checked([&] {
++        std::lock_guard<std::mutex> metadata_guard(managed_metadata_mutex);
++#ifndef __linux__
++        GGML_UNUSED(managed); GGML_UNUSED(graph); GGML_UNUSED(dependency_fd);
++        GGML_UNUSED(before_accept); GGML_UNUSED(user);
++        throw std::runtime_error("managed DMA-BUF provider requires Linux");
++#else
++        require(managed && !managed->broken && !managed->active && out_tail && out_fd && before_accept,
++                "invalid managed submission or occupied context");
++        auto * ctx = static_cast<ggml_backend_vk_context *>(managed->backend->context);
++        require(managed->prepared_valid && managed->prepared == validate_graph(ctx, graph),
++                "managed graph was not prepared for this shape");
++        const auto * y = graph->nodes[0];
++        const binding a = validate_binding(ctx, y->src[0]);
++        const binding b = validate_binding(ctx, y->src[1]);
++        const binding d = validate_binding(ctx, y);
++        require(!overlaps(d, a) && !overlaps(d, b), "managed output aliases a live matrix input");
++        require(dependency_fd >= -1, "invalid incoming dependency descriptor");
++        auto resources = std::make_unique<invocation>();
++        resources->device = ctx->device;
++        resources->tail = std::make_shared<tail_state>();
++        resources->tail->device = ctx->device;
++        resources->tail->fence = ctx->device->device.createFence({});
++        for (const auto & bound : {a, b, d}) {
++            if (std::find(resources->buffers.begin(), resources->buffers.end(), bound.buffer) == resources->buffers.end()) {
++                resources->buffers.push_back(bound.buffer);
++            }
++        }
++        auto tail = std::make_unique<ggml_vk_managed_tail>();
++        tail->state = resources->tail;
++        managed->active = std::move(resources);
++        try {
++            auto & execution = *managed->active;
++            auto & device = ctx->device;
++            recording records{ctx, {}};
++            {
++                recording_scope scope(records);
++                require(ggml_backend_graph_compute_async(managed->backend, graph) == GGML_STATUS_SUCCESS,
++                        "ggml graph recording failed");
++            }
++            require(!records.commands.empty() && ctx->compute_ctx.expired() && ctx->transfer_ctx.expired(),
++                    "ggml graph left unsubmitted or unaccounted work");
++            require(!ctx->submit_pending && !ctx->almost_ready_fence_pending,
++                    "ggml graph requested an internal completion protocol");
++            const uint32_t family = device->compute_queue->queue_family_index;
++            execution.boundary_pool = device->device.createCommandPool({vk::CommandPoolCreateFlagBits::eTransient, family});
++            const auto boundary = device->device.allocateCommandBuffers({execution.boundary_pool, vk::CommandBufferLevel::ePrimary, 2});
++            std::vector<vk::BufferMemoryBarrier> acquires, releases;
++            for (const auto & buffer : execution.buffers) {
++                vk::BufferMemoryBarrier acquire;
++                acquire.srcAccessMask = {};
++                acquire.dstAccessMask = vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite;
++                acquire.srcQueueFamilyIndex = VK_QUEUE_FAMILY_FOREIGN_EXT;
++                acquire.dstQueueFamilyIndex = family;
++                acquire.buffer = buffer->buffer;
++                acquire.offset = 0;
++                acquire.size = VK_WHOLE_SIZE;
++                acquires.push_back(acquire);
++                auto release = acquire;
++                release.srcAccessMask = acquire.dstAccessMask;
++                release.dstAccessMask = {};
++                release.srcQueueFamilyIndex = family;
++                release.dstQueueFamilyIndex = VK_QUEUE_FAMILY_FOREIGN_EXT;
++                releases.push_back(release);
++            }
++            boundary[0].begin({vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
++            boundary[0].pipelineBarrier(vk::PipelineStageFlagBits::eTopOfPipe, vk::PipelineStageFlagBits::eComputeShader,
++                                        {}, {}, acquires, {});
++            boundary[0].end();
++            boundary[1].begin({vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
++            boundary[1].pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader, vk::PipelineStageFlagBits::eBottomOfPipe,
++                                        {}, {}, releases, {});
++            boundary[1].end();
++            if (dependency_fd >= 0) {
++                execution.incoming = device->device.createSemaphore({});
++                fd_owner incoming_fd{duplicate_fd(dependency_fd)};
++                vk::ImportSemaphoreFdInfoKHR info;
++                info.semaphore = execution.incoming;
++                info.flags = vk::SemaphoreImportFlagBits::eTemporary;
++                info.handleType = vk::ExternalSemaphoreHandleTypeFlagBits::eSyncFd;
++                info.fd = incoming_fd.value;
++                device->device.importSemaphoreFdKHR(info);
++                incoming_fd.release();
++            }
++            vk::ExportSemaphoreCreateInfo export_info;
++            export_info.handleTypes = vk::ExternalSemaphoreHandleTypeFlagBits::eSyncFd;
++            vk::SemaphoreCreateInfo semaphore_info;
++            semaphore_info.pNext = &export_info;
++            execution.outgoing = device->device.createSemaphore(semaphore_info);
++            std::vector<vk::CommandBuffer> commands;
++            commands.reserve(records.commands.size() + 2);
++            commands.push_back(boundary[0]);
++            commands.insert(commands.end(), records.commands.begin(), records.commands.end());
++            commands.push_back(boundary[1]);
++            const vk::PipelineStageFlags wait_stage = vk::PipelineStageFlagBits::eAllCommands;
++            vk::SubmitInfo submit;
++            if (execution.incoming) {
++                submit.waitSemaphoreCount = 1;
++                submit.pWaitSemaphores = &execution.incoming;
++                submit.pWaitDstStageMask = &wait_stage;
++            }
++            submit.commandBufferCount = uint32_t(commands.size());
++            submit.pCommandBuffers = commands.data();
++            submit.signalSemaphoreCount = 1;
++            submit.pSignalSemaphores = &execution.outgoing;
++            // Every owner, Vulkan object, command, and C tail is established
++            // before this edge. No accepted failure executes cleanup below.
++            *out_tail = tail.release();
++            execution.tail->possibly_accepted = true;
++            before_accept(user);
++            device->compute_queue->handle->submit({submit}, execution.tail->fence);
++            vk::SemaphoreGetFdInfoKHR get_fd;
++            get_fd.semaphore = execution.outgoing;
++            get_fd.handleType = vk::ExternalSemaphoreHandleTypeFlagBits::eSyncFd;
++            fd_owner exported{device->device.getSemaphoreFdKHR(get_fd)};
++            require(exported.value >= -1, "Vulkan returned an invalid completion sync_file");
++            if (exported.value >= 0) require(fcntl(exported.value, F_SETFD, FD_CLOEXEC) == 0,
++                                            "could not set completion sync_file close-on-exec");
++            *out_fd = exported.release();
++            return 0;
++        } catch (...) {
++            if (!managed->active->tail->possibly_accepted) {
++                // No VkQueueSubmit occurred. Discard recorded commands before
++                // releasing imported buffers. Failure to reset makes this slot
++                // unusable; it does not fabricate a successfully retired slot.
++                try {
++                    ctx->compute_ctx.reset();
++                    ctx->transfer_ctx.reset();
++                    ctx->submit_pending = false;
++                    ctx->almost_ready_fence_pending = false;
++                    ggml_vk_graph_cleanup(ctx);
++                } catch (const vk::DeviceLostError &) {
++                    managed_error_fatal = true;
++                    managed->broken = true;
++                } catch (const std::bad_alloc &) {
++                    managed_error_fatal = true;
++                    managed->broken = true;
++                } catch (...) {
++                    managed->broken = true;
++                }
++                managed->active.reset();
++            }
++            throw;
++        }
++#endif
++    });
++}
++
++extern "C" int ggml_vk_managed_retire(ggml_vk_managed_t managed) {
++    return checked([&] {
++        std::lock_guard<std::mutex> metadata_guard(managed_metadata_mutex);
++        require(managed && !managed->broken && managed->active, "managed context has no retireable invocation");
++        require(query_tail(managed->active->tail) == 0, "managed invocation is still in physical use");
++        auto * ctx = static_cast<ggml_backend_vk_context *>(managed->backend->context);
++        // The caller has additionally checked its native kernel/reset/status
++        // contract. Fence readiness alone never establishes native health.
++        ggml_vk_graph_cleanup(ctx);
++        managed->active.reset();
++        return 0;
++    });
++}
++
++extern "C" int ggml_vk_managed_tail_query(ggml_vk_managed_tail_t tail) {
++    return checked([&] {
++        require(tail, "null managed tail");
++        return query_tail(tail->state);
++    });
++}
++
++extern "C" int ggml_vk_managed_tail_wait(ggml_vk_managed_tail_t tail, uint64_t timeout_ns) {
++    return checked([&] {
++        require(tail && tail->state && tail->state->possibly_accepted, "tail has no accepted submission");
++        const auto result = tail->state->device->device.waitForFences({tail->state->fence}, true, timeout_ns);
++        if (result == vk::Result::eTimeout) return 1;
++        check_vk(VkResult(result), "vkWaitForFences(managed)");
++        tail->state->success_observed.store(true, std::memory_order_release);
++        return 0;
++    });
++}
++
++extern "C" int ggml_vk_managed_tail_destroy(ggml_vk_managed_tail_t tail) {
++    return checked([&] {
++        if (!tail) return 0;
++        if (tail->state->possibly_accepted) require(tail->state->success_observed.load(std::memory_order_acquire),
++                "managed tail has no success observation; retain it until checked completion");
++        delete tail;
++        return 0;
++    });
++}
+--- a/src/ggml-vulkan/ggml-vulkan-types.h
++++ b/src/ggml-vulkan/ggml-vulkan-types.h
+@@ -259,10 +259,11 @@
+     ggml_type type_b;
+     bool mul_mat_id;
+     bool f16acc;
++    bool full_f32 = false;
+ 
+     bool operator<(const vk_matmul_pipeline_key & o) const {
+-        return std::tie(type_a, type_b, mul_mat_id, f16acc)
+-             < std::tie(o.type_a, o.type_b, o.mul_mat_id, o.f16acc);
++        return std::tie(type_a, type_b, mul_mat_id, f16acc, full_f32)
++             < std::tie(o.type_a, o.type_b, o.mul_mat_id, o.f16acc, o.full_f32);
+     }
+ };
+ 
+@@ -677,6 +678,7 @@
+     uint64_t suballocation_block_size;
+     uint64_t min_imported_host_pointer_alignment;
+     bool external_memory_host {};
++    bool managed_external_interop {};
+     bool fp16;
+     bool bf16;
+     bool pipeline_robustness;
+@@ -1036,8 +1038,9 @@
+     vk::Buffer buffer = VK_NULL_HANDLE;
+     vk::DeviceMemory device_memory = VK_NULL_HANDLE;
+     vk::MemoryPropertyFlags memory_property_flags;
+-    void * ptr;
++    void * ptr = nullptr;
+     size_t size = 0;
++    bool managed_external = false;
+     vk::DeviceAddress bda_addr {};
+ 
+     vk_device device;
+@@ -1050,8 +1053,13 @@
+ 
+         // bump before destroying, so a thread that sees the buffer gone also sees the new count
+         device->buffer_destroy_count.fetch_add(1, std::memory_order_release);
+-        device->device.freeMemory(device_memory);
+-        device->device.destroyBuffer(buffer);
++        if (managed_external) {
++            device->device.destroyBuffer(buffer);
++            device->device.freeMemory(device_memory);
++        } else {
++            device->device.freeMemory(device_memory);
++            device->device.destroyBuffer(buffer);
++        }
+     }
+ };
+ 
+@@ -1219,6 +1227,9 @@
+ };
+ 
+ struct ggml_backend_vk_context {
++    // Managed resident execution records before accepting work and delegates
++    // readiness/retirement to the external runtime. Ordinary ggml is unchanged.
++    bool managed_external = false;
+     std::string name;
+ 
+     vk_device device;
+--- a/src/ggml-vulkan/ggml-vulkan.cpp
++++ b/src/ggml-vulkan/ggml-vulkan.cpp
+@@ -904,6 +904,9 @@
+ }
+ 
+ void ggml_vk_submit(vk_context& ctx, vk::Fence fence) {
++    if (ggml_vk_managed_record_submission(ctx, fence)) {
++        return;
++    }
+     if (ctx->seqs.empty()) {
+         if (fence) {
+             ctx->p->q->handle->submit({}, fence);
+@@ -2265,6 +2268,33 @@
+ 
+     std::vector<vk_tile_config> tc_mm = {{s_warptile, s_wg_denoms, s_align}, {m_warptile, m_wg_denoms, m_align}, {l_warptile, l_wg_denoms, l_align}};
+     std::vector<vk_tile_config> tc_mmq = {{s_warptile_mmq, s_mmq_wg_denoms, s_align}, {m_warptile_mmq, m_mmq_wg_denoms, m_align}, {l_warptile_mmq, l_mmq_wg_denoms, l_align}};
++
++    // F32 storage plus F32 accumulation is not full F32 arithmetic in the
++    // ordinary FP16 path: mul_mm.comp stages operands in FLOAT_TYPEV2 shared
++    // arrays. Managed F32 requests select the already supplied *_fp32 shader
++    // explicitly, without mutating the device's FP16 capability or other keys.
++    if (!device->coopmat_support && !device->coopmat2) {
++        std::vector<vk_tile_config> full_f32_tiles;
++        for (const auto & tile : tc_mm) {
++            const auto & wt = tile.warptile;
++            // DATA_A_F32 in mul_mm.comp fixes BK=32; specialization ID 3
++            // (wt[3]) is ignored for this shader. The scalar path adds one
++            // vec2 of padding per row in each of its two shared arrays.
++            constexpr uint32_t f32_bk = 32;
++            const uint64_t shared_bytes = uint64_t(wt[1] + wt[2]) * (f32_bk / 2 + 1) * 2 * sizeof(float);
++            if (shared_bytes <= device->properties.limits.maxComputeSharedMemorySize &&
++                wt[0] <= device->properties.limits.maxComputeWorkGroupInvocations &&
++                wt[0] <= device->properties.limits.maxComputeWorkGroupSize[0]) {
++                full_f32_tiles.push_back(tile);
++            }
++        }
++        if (!full_f32_tiles.empty()) {
++            create_mm_pipelines({GGML_TYPE_F32, GGML_TYPE_F32, false, false, true}, full_f32_tiles,
++                "matmul_full_f32", matmul_f32_f32_fp32_len, matmul_f32_f32_fp32_data,
++                sizeof(vk_mat_mat_push_constants), 3,
++                [&](const std::vector<uint32_t> & wt, bool aligned) { return ggml_vk_mul_mm_spec(wt, aligned); });
++        }
++    }
+ 
+ #if defined(VK_NV_cooperative_matrix2) && defined(GGML_VULKAN_COOPMAT2_GLSLC_SUPPORT)
+     if (device->coopmat2) {
+@@ -4309,6 +4339,27 @@
+         std::vector<vk::DeviceQueueCreateInfo> device_queue_create_infos;
+         vk::DeviceCreateInfo device_create_info{};
+         std::vector<const char *> device_extensions;
++#ifdef __linux__
++        // This changes no ordinary allocation or execution path. Enabling the
++        // complete interop set here lets a managed context use this same ggml
++        // device; it must not silently create another physical-device binding.
++        const char * managed_extensions[] = {
++            VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
++            VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME,
++            VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME,
++            VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME,
++        };
++        device->managed_external_interop = std::all_of(
++                std::begin(managed_extensions), std::end(managed_extensions),
++                [&](const char * name) {
++                    return std::any_of(ext_props.begin(), ext_props.end(), [&](const auto & prop) {
++                        return strcmp(name, prop.extensionName) == 0;
++                    });
++                });
++        if (device->managed_external_interop) {
++            device_extensions.insert(device_extensions.end(), std::begin(managed_extensions), std::end(managed_extensions));
++        }
++#endif
+         vk::PhysicalDeviceFeatures device_features = device->physical_device.getFeatures();
+ 
+         VkPhysicalDeviceFeatures2 device_features2;
+@@ -5834,6 +5885,9 @@
+ }
+ 
+ vk_context ggml_vk_get_compute_ctx(ggml_backend_vk_context * ctx) {
++    if (ctx->managed_external && !ggml_vk_managed_is_recording(ctx)) {
++        throw std::runtime_error("managed compute commands require a managed recording scope");
++    }
+     vk_context result;
+     if (!ctx->compute_ctx.expired()) {
+         result = ctx->compute_ctx.lock();
+@@ -5853,6 +5907,9 @@
+ }
+ 
+ vk_context ggml_vk_get_transfer_ctx(ggml_backend_vk_context * ctx) {
++    if (ctx->managed_external) {
++        throw std::runtime_error("managed resident program does not admit a transfer queue");
++    }
+     vk_context result;
+     if (!ctx->transfer_ctx.expired()) {
+         result = ctx->transfer_ctx.lock();
+@@ -5892,6 +5949,9 @@
+ }
+ 
+ void deferred_memcpy(void * dst, const void * src, size_t size, std::vector<vk_staging_memcpy>* memcpys) {
++    if (ggml_vk_managed_is_recording(nullptr)) {
++        throw std::runtime_error("managed resident program attempted a host copy continuation");
++    }
+     if (memcpys == nullptr) {
+         memcpy(dst, src, size);
+     } else {
+@@ -5900,6 +5960,9 @@
+ }
+ 
+ void deferred_memset(void * dst, uint32_t val, size_t size, std::vector<vk_staging_memset>* memsets) {
++    if (ggml_vk_managed_is_recording(nullptr)) {
++        throw std::runtime_error("managed resident program attempted a host memset continuation");
++    }
+     if (memsets == nullptr) {
+         memset(dst, val, size);
+     } else {
+@@ -6033,7 +6096,8 @@
+ static const std::vector<vk_matmul_pipeline_pair>* ggml_vk_get_mul_mat_mat_pipeline_map(
+         ggml_backend_vk_context * ctx, ggml_type src0_type, ggml_type src1_type, ggml_prec prec, bool mul_mat_id = false) {
+     bool f16acc = ggml_vk_get_mul_mat_mat_f16acc(ctx, src0_type, src1_type, prec);
+-    vk_matmul_pipeline_key key{src0_type, src1_type, mul_mat_id, f16acc};
++    vk_matmul_pipeline_key key{src0_type, src1_type, mul_mat_id, f16acc,
++                              ctx->managed_external && src0_type == GGML_TYPE_F32 && src1_type == GGML_TYPE_F32 && !mul_mat_id};
+     auto it = ctx->device->pipeline_matmul.find(key);
+     if (it == ctx->device->pipeline_matmul.end() || it->second.empty()) {
+         // Try without f16acc
+@@ -6054,6 +6118,32 @@
+     uint32_t idx = selector(m, n, 0, ctx->device->shader_core_count, configs);
+     if (idx >= configs.size()) idx = (uint32_t)configs.size() - 1;
+     return (aligned && configs[idx].aligned) ? configs[idx].aligned : configs[idx].unaligned;
++}
++
++void ggml_vk_managed_prepare_pipeline(ggml_backend_vk_context * ctx, const ggml_tensor * node) {
++    if (ctx->device->coopmat_support || ctx->device->coopmat2) {
++        throw std::runtime_error("managed full-F32 program currently admits the ordinary scalar matrix path only");
++    }
++    const auto * map = ggml_vk_get_mul_mat_mat_pipeline_map(ctx, GGML_TYPE_F32, GGML_TYPE_F32, GGML_PREC_F32);
++    if (!map) {
++        throw std::runtime_error("ggml device has no resident F32 x F32 matrix pipeline");
++    }
++    const auto m = uint32_t(node->ne[0]);
++    const auto n = uint32_t(node->ne[1]);
++    const auto k = uint32_t(node->src[0]->ne[0]);
++    uint32_t index = ctx->device->matmul_tile_selector(m, n, 0, ctx->device->shader_core_count, *map);
++    index = std::min(index, uint32_t(map->size() - 1));
++    const auto & pair = (*map)[index];
++    if (!pair.align) throw std::runtime_error("invalid managed matrix pipeline alignment");
++    const bool aligned = (k % pair.align) == 0 && m > 8 && n > 8;
++    auto pipeline = aligned && pair.aligned ? pair.aligned : pair.unaligned;
++    if (!pipeline || !pipeline->wg_denoms[0] || !pipeline->wg_denoms[1] || !pipeline->wg_denoms[2] ||
++        (uint64_t(m) + pipeline->wg_denoms[0] - 1) / pipeline->wg_denoms[0] >
++            ctx->device->properties.limits.maxComputeWorkGroupCount[0]) {
++        throw std::runtime_error("managed matrix shape exceeds the selected pipeline dispatch domain");
++    }
++    // Compile the actual selected pipeline, without requiring tensor storage.
++    ggml_vk_load_shaders(ctx->device, pipeline);
+ }
+ 
+ static uint32_t ggml_vk_guess_matmul_pipeline_align_map(ggml_backend_vk_context * ctx,
+@@ -6394,7 +6484,7 @@
+     ggml_type f16_type = src0->type == GGML_TYPE_BF16 ? GGML_TYPE_BF16 : GGML_TYPE_F16;
+ 
+     const bool is_coopmat = ctx->device->coopmat_support || ctx->device->coopmat2;
+-    const bool can_quantize_y = (ctx->device->integer_dot_product || ctx->device->coopmat_int_support) &&
++    const bool can_quantize_y = !ctx->managed_external && (ctx->device->integer_dot_product || ctx->device->coopmat_int_support) &&
+                                 src1->type == GGML_TYPE_F32 && ggml_is_contiguous(src1) && (ne11 * ne10) % 4 == 0;
+     // coopmat shaders are fast enough that memory bandwidth reduction from f16 activations helps
+     const bool prefer_f16_b = is_coopmat && ggml_is_quantized(src0->type) && src1->type == GGML_TYPE_F32;
+@@ -6411,6 +6501,10 @@
+ 
+     const bool qx_needs_dequant = mmp_map == nullptr || x_non_contig;
+     const bool qy_needs_dequant = y_needs_reformat;
++
++    if (ctx->managed_external && (qx_needs_dequant || qy_needs_dequant || quantize_y || !y_f32_kernel)) {
++        throw std::runtime_error("managed F32 program attempted an internal numerical conversion");
++    }
+ 
+     if (qx_needs_dequant) {
+         // dequant src0 to f16
+@@ -7299,6 +7393,13 @@
+ }
+ 
+ void ggml_vk_mul_mat(ggml_backend_vk_context * ctx, vk_context& subctx, const struct ggml_cgraph * cgraph, int node_idx) {
++    if (ctx->managed_external) {
++        const auto * dst = cgraph->nodes[node_idx];
++        // Initial managed policy: use the ordinary F32 matrix shader for both
++        // N=1 and N>1. No conversion or split-K scratch is admitted.
++        ggml_vk_mul_mat_q_f16(ctx, subctx, dst->src[0], dst->src[1], cgraph->nodes[node_idx], true);
++        return;
++    }
+     ggml_tensor * dst = cgraph->nodes[node_idx];
+     ggml_tensor * src0 = dst->src[0];
+     ggml_tensor * src1 = dst->src[1];
+@@ -12153,6 +12254,9 @@
+ }
+ 
+ void ggml_vk_preallocate_buffers(ggml_backend_vk_context * ctx, vk_context subctx) {
++    if (ctx->managed_external) {
++        throw std::runtime_error("managed resident program attempted unprepared scratch allocation");
++    }
+ #if defined(GGML_VULKAN_RUN_TESTS)
+     const std::vector<size_t> vals {
+         512, 512, 128,
+@@ -12875,6 +12979,9 @@
+     VK_LOG_DEBUG("ggml_vk_compute_forward(" << tensor << ", name=" << tensor->name << ", op=" << ggml_op_name(tensor->op) << ", type=" << tensor->type << ", ne0=" << tensor->ne[0] << ", ne1=" << tensor->ne[1] << ", ne2=" << tensor->ne[2] << ", ne3=" << tensor->ne[3] << ", nb0=" << tensor->nb[0] << ", nb1=" << tensor->nb[1] << ", nb2=" << tensor->nb[2] << ", nb3=" << tensor->nb[3] << ", view_src=" << tensor->view_src << ", view_offs=" << tensor->view_offs << ")");
+ 
+     vk_context subctx = ctx->tensor_ctxs[tensor_idx].lock();
++    if (ctx->managed_external && (!subctx->in_memcpys.empty() || !subctx->out_memcpys.empty() || !subctx->memsets.empty())) {
++        throw std::runtime_error("managed resident program cannot contain deferred host work");
++    }
+ 
+     // Only run if ctx hasn't been submitted yet
+     if (!subctx->seqs.empty()) {
+@@ -12899,7 +13006,7 @@
+         } else {
+             ggml_vk_submit(subctx, {});
+         }
+-        ctx->submit_pending = true;
++        ctx->submit_pending = !ctx->managed_external;
+ 
+ #ifdef GGML_VULKAN_CHECK_RESULTS
+         ggml_vk_synchronize(ctx);
+@@ -12960,10 +13067,23 @@
+     VK_LOG_DEBUG("ggml_vk_cleanup(" << ctx->name << ")");
+     // discard any unsubmitted command buffers
+     ctx->compute_ctx.reset();
+-    // wait for any pending command buffers to finish
+-    ggml_vk_synchronize(ctx);
+-
+-    ggml_vk_graph_cleanup(ctx);
++    if (!ctx->managed_external) {
++        // Ordinary ggml owns its synchronization and graph retirement.
++        ggml_vk_synchronize(ctx);
++        ggml_vk_graph_cleanup(ctx);
++    } else {
++        // The managed public destructor rejects active invocations. Successful
++        // retirement already performed all fallible reset/status operations;
++        // never-submitted commands may simply be discarded. Destruction does
++        // not repeat a wait/reset that could lose its error-reporting owner.
++        ctx->transfer_ctx.reset();
++        for (const auto & semaphore : ctx->gc.semaphores) ctx->device->device.destroySemaphore(semaphore.s);
++        for (const auto & semaphore : ctx->gc.tl_semaphores) ctx->device->device.destroySemaphore(semaphore.s);
++        ctx->gc.semaphores.clear();
++        ctx->gc.tl_semaphores.clear();
++        ctx->tensor_ctxs.clear();
++        ctx->gc.contexts.clear();
++    }
+ 
+     ggml_vk_destroy_buffer(ctx->prealloc_x);
+     ggml_vk_destroy_buffer(ctx->prealloc_y);
+@@ -13468,6 +13588,9 @@
+ }
+ 
+ void ggml_vk_synchronize(ggml_backend_vk_context * ctx) {
++    if (ctx->managed_external) {
++        throw std::runtime_error("managed graph cannot synchronize through ordinary ggml completion");
++    }
+     VK_LOG_DEBUG("ggml_vk_synchronize()");
+ 
+     bool do_transfer = !ctx->compute_ctx.expired();
+@@ -13541,6 +13664,9 @@
+ static void ggml_backend_vk_synchronize(ggml_backend_t backend) {
+     VK_LOG_DEBUG("ggml_backend_vk_synchronize()");
+     ggml_backend_vk_context * ctx = (ggml_backend_vk_context *)backend->context;
++    if (ctx->managed_external) {
++        throw std::runtime_error("managed readiness and resource reuse require tail completion and managed retirement");
++    }
+ 
+     ggml_vk_synchronize(ctx);
+ 
+@@ -14291,6 +14417,9 @@
+ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cgraph * cgraph) {
+     VK_LOG_DEBUG("ggml_backend_vk_graph_compute(" << cgraph->n_nodes << " nodes)");
+     ggml_backend_vk_context * ctx = (ggml_backend_vk_context *)backend->context;
++    if (ctx->managed_external && !ggml_vk_managed_is_recording(ctx)) {
++        throw std::runtime_error("managed backend must execute through ggml_vk_managed_submit");
++    }
+ 
+     ctx->device->diag_cgraph = nullptr;
+     ctx->device->diag_prev_start = -1;

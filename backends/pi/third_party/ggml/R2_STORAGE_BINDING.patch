@@ -1,0 +1,34 @@
+--- /Users/rohanchanani/Downloads/mstar-accelerators/.research-cache/llama.cpp/ggml/src/ggml-vulkan/ggml-vulkan.cpp	2026-10-19 13:49:47
++++ /Users/rohanchanani/Documents/Codex/2026-10-19/https-github-com-mstar-project-mstar/outputs/pi-backend-investigation-2026-10-21/sources/pi-installed-ggml/ggml/src/ggml-vulkan/ggml-vulkan.cpp	2026-10-19 17:35:14
+@@ -577,6 +577,10 @@
+                  disable_robustness << ", " << require_full_subgroups << ", " << required_subgroup_size << ")");
+     GGML_ASSERT(parameter_count > 0);
+     GGML_ASSERT(parameter_count <= MAX_PARAMETER_COUNT);
++    if (parameter_count > device->properties.limits.maxPerStageDescriptorStorageBuffers ||
++        parameter_count > device->properties.limits.maxDescriptorSetStorageBuffers) {
++        throw std::runtime_error("ggml Vulkan pipeline exceeds the device storage-buffer binding limit");
++    }
+     GGML_ASSERT(wg_denoms[0] > 0 && wg_denoms[1] > 0 && wg_denoms[2] > 0); // NOLINT
+ 
+     vk::ShaderModuleCreateInfo shader_module_create_info({}, spv_size, reinterpret_cast<const uint32_t *>(spv_data));
+@@ -4518,6 +4522,8 @@
+         device->pipeline_robustness = pl_robustness_features.pipelineRobustness;
+ 
+         device->multi_add = vk12_props.shaderRoundingModeRTEFloat16 &&
++                            device->properties.limits.maxPerStageDescriptorStorageBuffers >= MAX_PARAMETER_COUNT &&
++                            device->properties.limits.maxDescriptorSetStorageBuffers >= MAX_PARAMETER_COUNT &&
+                             device->properties.limits.maxPushConstantsSize >= sizeof(vk_op_multi_add_push_constants) &&
+                             getenv("GGML_VK_DISABLE_MULTI_ADD") == nullptr;
+ 
+@@ -4867,7 +4873,10 @@
+ 
+         std::vector<vk::DescriptorSetLayoutBinding> dsl_binding;
+         std::vector<vk::DescriptorBindingFlags> dsl_binding_flags;
+-        for (uint32_t i = 0; i < MAX_PARAMETER_COUNT; i++) {
++        const uint32_t binding_count = std::min({uint32_t(MAX_PARAMETER_COUNT),
++            device->properties.limits.maxPerStageDescriptorStorageBuffers,
++            device->properties.limits.maxDescriptorSetStorageBuffers});
++        for (uint32_t i = 0; i < binding_count; i++) {
+             dsl_binding.push_back({i, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eCompute});
+             dsl_binding_flags.push_back({});
+         }

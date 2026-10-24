@@ -1,0 +1,23 @@
+# Run from mstar_accelerators, or render acceleration/checkpoint paths absolute.
+model: qwen3_omni
+device_type: cuda
+autocast_dtype: bfloat16
+max_seq_len: 32768
+max_concurrent_requests: 8
+preprocess_torch_threads: 1
+resources:
+  thinker_kv:
+    max_bytes: 3221225472
+    prefix_cache: false
+  talker_kv:
+    max_bytes: 671088640
+    prefix_cache: false
+node_groups:
+  - node_names: [audio_encoder, vision_encoder, Code2Wav]
+    ranks: [0]
+  - node_names: [Thinker, Talker]
+    ranks: [0]
+runtime_extension:
+  factory: mstar_accelerators.backends.torch.device_runtime:DeviceTorchRuntime
+  nodes: [Talker]
+  accelerations: accelerations/qwen3_omni/amd_a

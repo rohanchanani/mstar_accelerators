@@ -1,0 +1,36 @@
+{
+  "schema": "generated-to-filled-v1",
+  "generated_file": "authoring/qwen3_omni_amd_a/Talker.py",
+  "generated_sha256": "4c99c4e3f947e7a3102b5cc5369d5e745d750610e06f3e8d752b4ea8ad9ac890",
+  "filled_file": "accelerations/qwen3_omni/amd_a/Talker.py",
+  "filled_sha256": "d98f866fd43c03049b0d6028203acf478e4616c6e77f429bfa7507377b522c0d",
+  "generation": "Installed CLI create --execution tensor-forward --nodes Talker; config-only published checkpoint metadata; Torch CPU, no Triton or weights",
+  "implementation_files": {
+    "src/mstar_accelerators/implementations/qwen3_omni/amd_a/__init__.py": {
+      "sha256": "b50da70eb8588252afc70afb60a9a68df29245a1a9004cfd011bf2edeb648ca0",
+      "lines": 1,
+      "bytes": 58
+    },
+    "src/mstar_accelerators/implementations/qwen3_omni/amd_a/attention.py": {
+      "sha256": "0e70616fd6ee6db813018b301822194a92f8212fa59e674cf6e6ee772e58f4f8",
+      "lines": 56,
+      "bytes": 1768
+    },
+    "src/mstar_accelerators/implementations/qwen3_omni/amd_a/model.py": {
+      "sha256": "02e9c4409c85e8c18c8a67decb04acd7c809b0c90ebae29552ac64e3ac7819cd",
+      "lines": 560,
+      "bytes": 22846
+    },
+    "src/mstar_accelerators/implementations/qwen3_omni/amd_a/preparation.py": {
+      "sha256": "ae25937ad20a5c58bac7fa53480681fcc5c4a6516adf0260eeaf7c0625318bb6",
+      "lines": 87,
+      "bytes": 3556
+    },
+    "src/mstar_accelerators/implementations/qwen3_omni/amd_a/program.py": {
+      "sha256": "7869dd7e2b9041cb22ed4636372a061247c245850bc32c40675de93eb2ac11e4",
+      "lines": 435,
+      "bytes": 18094
+    }
+  },
+  "scope": "The book diff includes the program import; all physical implementation files are separately counted here. Shared kernel primitives and runtime changes are recorded by the paired source patches."
+}

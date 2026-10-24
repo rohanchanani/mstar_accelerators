@@ -1,0 +1,86 @@
+{
+  "model": "openai/whisper-tiny",
+  "revision": "169d4a4341b33bc18d8881c4b69c2e104e1cc0af",
+  "files": [
+    {
+      "path": "added_tokens.json",
+      "bytes": 34604,
+      "sha256": "9715fd2243b6f06a5858b5e32950d2853f73dd5bc201aafcf76f5082a2d8acd1"
+    },
+    {
+      "path": "config.json",
+      "bytes": 1983,
+      "sha256": "ffdccec4f3211f4c63310f2b7098f309fe70f3952cedc5e4d11e43f5b2379b98"
+    },
+    {
+      "path": "generation_config.json",
+      "bytes": 3747,
+      "sha256": "a5d5325911f16e74001a72fa13d6e208eee51548f994646de1f4b4cc8b35b512"
+    },
+    {
+      "path": "merges.txt",
+      "bytes": 493869,
+      "sha256": "2df2990a395e35e8dfbc7511e08c12d56018d8d04691e0133e5d63b21e154dc6"
+    },
+    {
+      "path": "model.safetensors",
+      "bytes": 151061672,
+      "sha256": "7ebd0e69e78190ffe1438491fa05cc1f5c1aa3a4c4db3bc1723adbb551ea2395"
+    },
+    {
+      "path": "normalizer.json",
+      "bytes": 52666,
+      "sha256": "bf1c507dc8724ca9cf9903640dacfb69dae2f00edee4f21ceba106a7392f26dd"
+    },
+    {
+      "path": "preprocessor_config.json",
+      "bytes": 184990,
+      "sha256": "9b5cd03a36fbb8a627c64d98a5b5b126ead95a77720723944487311f0110b666"
+    },
+    {
+      "path": "special_tokens_map.json",
+      "bytes": 2194,
+      "sha256": "e67ae3a0aaa99abcd9f187138e12db1f65c16a14761c50ef10eef2c174a7a691"
+    },
+    {
+      "path": "tokenizer.json",
+      "bytes": 2480466,
+      "sha256": "27fc476bfe7f17299480be2273fc0608e4d5a99aba2ab5dec5374b4482d1a566"
+    },
+    {
+      "path": "tokenizer_config.json",
+      "bytes": 282683,
+      "sha256": "2a4c4281cf9f51ac6ccc406fdc711a087afe6530f671fa7b80953edc498275ce"
+    },
+    {
+      "path": "vocab.json",
+      "bytes": 835550,
+      "sha256": "8f680bba319e01a653d2e8a5dbc17a9157179e0576e6ce74ce0c06356c6e24f9"
+    }
+  ],
+  "audio": {
+    "source_url": "https://raw.githubusercontent.com/openai/whisper/6e3be77e1a105e59086e3e21ff5f609fd6fa89a5/tests/jfk.flac",
+    "revision": "6e3be77e1a105e59086e3e21ff5f609fd6fa89a5",
+    "sha256": "63a4b1e4c1dc655ac70961ffbf518acd249df237e5a0152faae9a4a836949715",
+    "bytes": 1152693,
+    "derived": {
+      "path": "jfk16k.wav",
+      "bytes": 352044,
+      "sha256": "b9e1ae4e0837e7b99f05e4f61f70f5732320a56614ab4514d803fa85f9a563c4",
+      "sample_rate": 16000,
+      "channels": 1,
+      "frames": 176000,
+      "encoding": "PCM16",
+      "command": "ffmpeg -nostdin -y -loglevel error -i jfk.flac -ac 1 -ar 16000 -c:a pcm_s16le -fflags +bitexact -flags:a +bitexact -map_metadata -1 jfk16k.wav",
+      "tool": "ffmpeg 6.1.1-3ubuntu5"
+    },
+    "tail": {
+      "path": "jfk_tail16k.wav",
+      "bytes": 192044,
+      "sha256": "e59a8486354562899b73f1e186f6f53ae70b58807d807b29f64e078916f56afc",
+      "source": "jfk16k.wav",
+      "first_frame": 80000,
+      "frames": 96000
+    }
+  }
+}

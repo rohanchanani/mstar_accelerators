@@ -1,0 +1,80 @@
+{
+  "reference": "Original HF WhisperEncoder + original M* WhisperDecoderModel, float32, greedy, model-owned prompt/suppression, actual M* resource plans",
+  "model": "openai/whisper-tiny",
+  "revision": "169d4a4341b33bc18d8881c4b69c2e104e1cc0af",
+  "cases": {
+    "jfk16k.wav": {
+      "text": " And so my fellow Americans ask not what your country can do for you ask what you can do for your country.",
+      "tokens": [
+        400,
+        370,
+        452,
+        7177,
+        6280,
+        1029,
+        406,
+        437,
+        428,
+        1941,
+        393,
+        360,
+        337,
+        291,
+        1029,
+        437,
+        291,
+        393,
+        360,
+        337,
+        428,
+        1941,
+        13,
+        50257
+      ],
+      "prompt_ids": [
+        50258,
+        50259,
+        50359,
+        50363
+      ],
+      "generated_tokens": 24,
+      "stopped_by": "eos",
+      "position_after_commit": 27,
+      "sampling_offset_after_commit": 24,
+      "audio_sha256": "b9e1ae4e0837e7b99f05e4f61f70f5732320a56614ab4514d803fa85f9a563c4"
+    },
+    "jfk_tail16k.wav": {
+      "text": " What your country can do for you as what you can do for your country.",
+      "tokens": [
+        708,
+        428,
+        1941,
+        393,
+        360,
+        337,
+        291,
+        382,
+        437,
+        291,
+        393,
+        360,
+        337,
+        428,
+        1941,
+        13,
+        50257
+      ],
+      "prompt_ids": [
+        50258,
+        50259,
+        50359,
+        50363
+      ],
+      "generated_tokens": 17,
+      "stopped_by": "eos",
+      "position_after_commit": 20,
+      "sampling_offset_after_commit": 17,
+      "audio_sha256": "e59a8486354562899b73f1e186f6f53ae70b58807d807b29f64e078916f56afc"
+    }
+  }
+}

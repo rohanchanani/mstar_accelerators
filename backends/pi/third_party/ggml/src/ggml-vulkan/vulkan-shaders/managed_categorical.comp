@@ -1,0 +1,101 @@
+#version 450
+
+// philox4x32-10-gumbel23-v1; see backends/pi/docs/categorical.md.
+// No shaderInt64, subgroup, scratch buffer, or host RNG state is required.
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+layout(push_constant) uniform Parameters {
+    uint vocabulary;
+    uint rows;
+    float unused1;
+    float unused2;
+    float unused3;
+    float unused4;
+} p;
+layout(binding = 0) readonly buffer Logits { float logits[]; };
+layout(binding = 1) readonly buffer Seeds { uvec2 seeds[]; };
+layout(binding = 2) readonly buffer Offsets { uvec2 offsets[]; };
+layout(binding = 3) readonly buffer Temperatures { float temperatures[]; };
+layout(binding = 4) writeonly buffer Tokens { uvec2 tokens[]; };
+
+shared float values[256];
+shared uint indices[256];
+
+// Philox algorithm from Salmon et al., SC11 / Random123. Constants and round
+// word ordering follow https://www.random123.com/releases/docs/philox_8h_source.html.
+uvec4 philox(uvec4 counter, uvec2 key) {
+    for (uint round = 0; round < 10; ++round) {
+        uint hi0, lo0, hi1, lo1;
+        umulExtended(0xD2511F53u, counter.x, hi0, lo0);
+        umulExtended(0xCD9E8D57u, counter.z, hi1, lo1);
+        counter = uvec4(hi1 ^ counter.y ^ key.x, lo1,
+                        hi0 ^ counter.w ^ key.y, lo0);
+        key += uvec2(0x9E3779B9u, 0xBB67AE85u);
+    }
+    return counter;
+}
+
+void main() {
+    const uint row = gl_WorkGroupID.z * 262144u + gl_WorkGroupID.y * 512u + gl_WorkGroupID.x;
+    if (row >= p.rows) return;
+    const uint lane = gl_LocalInvocationID.x;
+    const float neg_inf = uintBitsToFloat(0xff800000u);
+    const float temperature = temperatures[row];
+    float maximum = neg_inf;
+    uint invalid = uint(!(temperature > 0.0) || isinf(temperature) || isnan(temperature));
+    for (uint token = lane; token < p.vocabulary; token += 256u) {
+        const float value = logits[row * p.vocabulary + token];
+        invalid |= uint(isnan(value));
+        maximum = max(maximum, value);
+    }
+    values[lane] = maximum;
+    indices[lane] = invalid;
+    barrier();
+    for (uint width = 128u; width > 0u; width >>= 1u) {
+        if (lane < width) {
+            values[lane] = max(values[lane], values[lane + width]);
+            indices[lane] |= indices[lane + width];
+        }
+        barrier();
+    }
+    maximum = values[0];
+    invalid = indices[0] | uint(maximum == neg_inf);
+    // The branch is uniform across the workgroup. Invalid rows produce an
+    // explicit -1 token; no default token or successful sample is invented.
+    if (invalid != 0u) {
+        if (lane == 0u) tokens[row] = uvec2(0xffffffffu);
+        return;
+    }
+    // Every lane must capture the first reduction before its storage is reused.
+    barrier();
+    float best = neg_inf;
+    uint best_index = 0xffffffffu;
+    for (uint token = lane; token < p.vocabulary; token += 256u) {
+        const float value = logits[row * p.vocabulary + token];
+        if (value == neg_inf || (isinf(maximum) && value != maximum)) continue;
+        const uint word = philox(uvec4(offsets[row], token, 0u), seeds[row]).x;
+        // 23-bit midpoints are exact F32 and strictly between zero and one.
+        const float u = (float(word >> 9u) + 0.5) * (1.0 / 8388608.0);
+        // Equal maxima use zero directly, including +inf and tiny temperature.
+        const float centered = value == maximum ? 0.0 : (value - maximum) / temperature;
+        const float score = centered - log(-log(u));
+        if (score > best || (score == best && token < best_index)) {
+            best = score;
+            best_index = token;
+        }
+    }
+    values[lane] = best;
+    indices[lane] = best_index;
+    barrier();
+    for (uint width = 128u; width > 0u; width >>= 1u) {
+        if (lane < width) {
+            const float other = values[lane + width];
+            const uint other_index = indices[lane + width];
+            if (other > values[lane] || (other == values[lane] && other_index < indices[lane])) {
+                values[lane] = other;
+                indices[lane] = other_index;
+            }
+        }
+        barrier();
+    }
+    if (lane == 0u) tokens[row] = uvec2(indices[0], 0u);
+}

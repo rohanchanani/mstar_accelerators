@@ -1,0 +1,35 @@
+#version 450
+
+#include "types.glsl"
+#include "generic_unary_head.glsl"
+
+#ifndef MSTAR_MANAGED_WORKGROUP
+#define MSTAR_MANAGED_WORKGROUP 512
+#endif
+layout(local_size_x = MSTAR_MANAGED_WORKGROUP, local_size_y = 1, local_size_z = 1) in;
+
+void main() {
+    const uint idx = get_idx();
+
+    if (idx >= p.ne) {
+        return;
+    }
+
+#if defined(COPY_I32_I64)
+    int value = data_a[get_aoffset() + src0_idx(idx)];
+    data_d[get_doffset() + dst_idx(idx)] = uvec2(uint(value), value < 0 ? 0xffffffffu : 0u);
+#elif defined(COPY_I64_I32)
+    // Index conversion's admitted values are supplied by the checked resource
+    // plan and fit I32. Preserve the low word, including two's-complement sign.
+    data_d[get_doffset() + dst_idx(idx)] = int(data_a[get_aoffset() + src0_idx(idx)].x);
+#elif defined(DATA_A_BF16)
+    data_d[get_doffset() + dst_idx(idx)] = D_TYPE(bf16_to_fp32(uint32_t(data_a[get_aoffset() + src0_idx(idx)])));
+#elif defined(DATA_D_BF16)
+    float f = float(data_a[get_aoffset() + src0_idx(idx)]);
+    data_d[get_doffset() + dst_idx(idx)] = D_TYPE(fp32_to_bf16(f));
+#elif !defined(OPTIMIZATION_ERROR_WORKAROUND)
+    data_d[get_doffset() + dst_idx(idx)] = D_TYPE(data_a[get_aoffset() + src0_idx(idx)]);
+#else
+    data_d[get_doffset() + dst_idx(idx)] = data_a[get_aoffset() + src0_idx(idx)];
+#endif
+}

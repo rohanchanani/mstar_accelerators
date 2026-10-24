@@ -1,0 +1,914 @@
+--- a/drivers/gpu/drm/v3d/v3d_drv.h
++++ b/drivers/gpu/drm/v3d/v3d_drv.h
+@@ -211,10 +211,13 @@
+ 
+ 	/* Global reset counter. The counter must be incremented when
+ 	 * a GPU reset happens. It must be protected by @reset_lock.
+ 	 */
+ 	unsigned int reset_counter;
++
++	/* Sticky compute failure. Quarantined jobs retain BOs until reboot. */
++	int csd_error;
+ };
+ 
+ static inline struct v3d_dev *
+ to_v3d_dev(struct drm_device *dev)
+ {
+@@ -230,10 +233,12 @@
+ #define v3d_to_pdev(v3d) to_platform_device((v3d)->drm.dev)
+ 
+ /* The per-fd struct, which tracks the MMU mappings. */
+ struct v3d_file_priv {
+ 	struct v3d_dev *v3d;
++	/* Jobs may outlive close, including fatal quarantine and late IRQs. */
++	struct kref refcount;
+ 
+ 	struct {
+ 		struct idr idr;
+ 		struct mutex lock;
+ 	} perfmon;
+@@ -322,10 +327,16 @@
+ 
+ 	/* scheduler fence for when the job is considered complete and
+ 	 * the BO reservations can be released.
+ 	 */
+ 	struct dma_fence *done_fence;
++
++	/* Submission epoch and cleanup ownership for uncertain completion. */
++	unsigned int reset_counter;
++	bool needs_cache_clean;
++	bool cache_clean_complete;
++	bool quarantined;
+ 
+ 	/* Pointer to a performance monitor object if the user requested it,
+ 	 * NULL otherwise.
+ 	 */
+ 	struct v3d_perfmon *perfmon;
+@@ -585,18 +596,20 @@
+ void v3d_reset_sms(struct v3d_dev *v3d);
+ void v3d_reset(struct v3d_dev *v3d);
+ void v3d_idle_axi(struct v3d_dev *v3d, int core);
+ void v3d_idle_gca(struct v3d_dev *v3d);
+ void v3d_invalidate_caches(struct v3d_dev *v3d);
+-void v3d_clean_caches(struct v3d_dev *v3d);
++int v3d_clean_caches(struct v3d_dev *v3d);
++void v3d_csd_poison_device(struct v3d_dev *v3d, int error);
+ 
+ /* v3d_gemfs.c */
+ extern bool super_pages;
+ void v3d_gemfs_init(struct v3d_dev *v3d);
+ void v3d_gemfs_fini(struct v3d_dev *v3d);
+ 
+ /* v3d_submit.c */
++void v3d_file_priv_put(struct v3d_file_priv *v3d_priv);
+ void v3d_job_cleanup(struct v3d_job *job);
+ void v3d_job_put(struct v3d_job *job);
+ int v3d_submit_cl_ioctl(struct drm_device *dev, void *data,
+ 			struct drm_file *file_priv);
+ int v3d_submit_tfu_ioctl(struct drm_device *dev, void *data,
+--- a/include/uapi/drm/v3d_drm.h
++++ b/include/uapi/drm/v3d_drm.h
+@@ -294,10 +294,18 @@
+ 	DRM_V3D_PARAM_SUPPORTS_CPU_QUEUE,
+ 	DRM_V3D_PARAM_MAX_PERF_COUNTERS,
+ 	DRM_V3D_PARAM_SUPPORTS_SUPER_PAGES,
+ 	DRM_V3D_PARAM_GLOBAL_RESET_COUNTER,
+ 	DRM_V3D_PARAM_CONTEXT_RESET_COUNTER,
++
++	/* Private Pi backend fork ABI; not an upstream-assigned parameter.
++	 * CONTRACT: 1 = the CSD completion contract documented with this patch.
++	 * STATUS: 0 = healthy, positive errno = sticky fatal state; reboot only.
++	 * These values are deliberately outside the sequential upstream IDs.
++	 */
++	DRM_V3D_PARAM_CSD_COMPLETION_CONTRACT = 0x50490001,
++	DRM_V3D_PARAM_CSD_DEVICE_STATUS = 0x50490002,
+ };
+ 
+ struct drm_v3d_get_param {
+ 	__u32 param;
+ 	__u32 pad;
+--- a/drivers/gpu/drm/v3d/v3d_drv.c
++++ b/drivers/gpu/drm/v3d/v3d_drv.c
+@@ -124,10 +124,16 @@
+ 	case DRM_V3D_PARAM_GLOBAL_RESET_COUNTER:
+ 		mutex_lock(&v3d->reset_lock);
+ 		args->value = v3d->reset_counter;
+ 		mutex_unlock(&v3d->reset_lock);
+ 		return 0;
++	case DRM_V3D_PARAM_CSD_COMPLETION_CONTRACT:
++		args->value = v3d_has_csd(v3d) ? 1 : 0;
++		return 0;
++	case DRM_V3D_PARAM_CSD_DEVICE_STATUS:
++		args->value = -READ_ONCE(v3d->csd_error);
++		return 0;
+ 	case DRM_V3D_PARAM_CONTEXT_RESET_COUNTER:
+ 		mutex_lock(&v3d->reset_lock);
+ 		args->value = v3d_priv->reset_counter;
+ 		mutex_unlock(&v3d->reset_lock);
+ 		return 0;
+@@ -135,10 +141,26 @@
+ 		DRM_DEBUG("Unknown parameter %d\n", args->param);
+ 		return -EINVAL;
+ 	}
+ }
+ 
++static void
++v3d_file_priv_free(struct kref *ref)
++{
++	struct v3d_file_priv *v3d_priv =
++		container_of(ref, struct v3d_file_priv, refcount);
++
++	v3d_perfmon_close_file(v3d_priv);
++	kfree(v3d_priv);
++}
++
++void
++v3d_file_priv_put(struct v3d_file_priv *v3d_priv)
++{
++	kref_put(&v3d_priv->refcount, v3d_file_priv_free);
++}
++
+ static int
+ v3d_open(struct drm_device *dev, struct drm_file *file)
+ {
+ 	struct v3d_dev *v3d = to_v3d_dev(dev);
+ 	struct v3d_file_priv *v3d_priv;
+@@ -148,10 +170,11 @@
+ 	v3d_priv = kzalloc(sizeof(*v3d_priv), GFP_KERNEL);
+ 	if (!v3d_priv)
+ 		return -ENOMEM;
+ 
+ 	v3d_priv->v3d = v3d;
++	kref_init(&v3d_priv->refcount);
+ 
+ 	for (i = 0; i < V3D_MAX_QUEUES; i++) {
+ 		sched = &v3d->queue[i].sched;
+ 		ret = drm_sched_entity_init(&v3d_priv->sched_entity[i],
+ 					    DRM_SCHED_PRIORITY_NORMAL, &sched,
+@@ -176,30 +199,17 @@
+ }
+ 
+ static void
+ v3d_postclose(struct drm_device *dev, struct drm_file *file)
+ {
+-	struct v3d_dev *v3d = to_v3d_dev(dev);
+ 	struct v3d_file_priv *v3d_priv = file->driver_priv;
+-	unsigned long irqflags;
+ 	enum v3d_queue q;
+ 
+-	for (q = 0; q < V3D_MAX_QUEUES; q++) {
+-		struct v3d_queue_state *queue = &v3d->queue[q];
+-		struct v3d_job *job = queue->active_job;
+-
++	for (q = 0; q < V3D_MAX_QUEUES; q++)
+ 		drm_sched_entity_destroy(&v3d_priv->sched_entity[q]);
+ 
+-		if (job && job->base.entity == &v3d_priv->sched_entity[q]) {
+-			spin_lock_irqsave(&queue->queue_lock, irqflags);
+-			job->file_priv = NULL;
+-			spin_unlock_irqrestore(&queue->queue_lock, irqflags);
+-		}
+-	}
+-
+-	v3d_perfmon_close_file(v3d_priv);
+-	kfree(v3d_priv);
++	v3d_file_priv_put(v3d_priv);
+ }
+ 
+ void v3d_get_stats(const struct v3d_stats *stats, u64 timestamp,
+ 		   u64 *active_runtime, u64 *jobs_completed)
+ {
+@@ -484,10 +494,14 @@
+ 
+ static struct platform_driver v3d_platform_driver = {
+ 	.probe		= v3d_platform_drm_probe,
+ 	.remove		= v3d_platform_drm_remove,
+ 	.driver		= {
++		/* A poisoned device deliberately retains BOs and MMU ownership.
++		 * Version 1 supports reboot recovery, not manual unbind/rebind.
++		 */
++		.suppress_bind_attrs = true,
+ 		.name	= "v3d",
+ 		.of_match_table = v3d_of_match,
+ 		.pm = pm_ptr(&v3d_pm_ops),
+ 	},
+ };
+--- a/drivers/gpu/drm/v3d/v3d_submit.c
++++ b/drivers/gpu/drm/v3d/v3d_submit.c
+@@ -2,10 +2,12 @@
+ /*
+  * Copyright (C) 2014-2018 Broadcom
+  * Copyright (C) 2023 Raspberry Pi
+  */
+ 
++#include <linux/module.h>
++#include <drm/drm_drv.h>
+ #include <drm/drm_syncobj.h>
+ 
+ #include "v3d_drv.h"
+ #include "v3d_regs.h"
+ #include "v3d_trace.h"
+@@ -86,10 +88,12 @@
+ 
+ static void
+ v3d_job_free(struct kref *ref)
+ {
+ 	struct v3d_job *job = container_of(ref, struct v3d_job, refcount);
++	struct v3d_dev *v3d = job->v3d;
++	struct device *dev = v3d->drm.dev;
+ 	int i;
+ 
+ 	if (job->bo) {
+ 		for (i = 0; i < job->bo_count; i++)
+ 			drm_gem_object_put(job->bo[i]);
+@@ -103,11 +107,15 @@
+ 		v3d_perfmon_put(job->perfmon);
+ 
+ 	if (job->has_pm_ref)
+ 		v3d_pm_runtime_put(job->v3d);
+ 
++	v3d_file_priv_put(job->file_priv);
+ 	kfree(job);
++	drm_dev_put(&v3d->drm);
++	put_device(dev);
++	module_put(THIS_MODULE);
+ }
+ 
+ static void
+ v3d_render_job_free(struct kref *ref)
+ {
+@@ -186,10 +194,12 @@
+ 	int ret, i;
+ 
+ 	job->v3d = v3d;
+ 	job->free = free;
+ 	job->file_priv = v3d_priv;
++	job->reset_counter = READ_ONCE(v3d->reset_counter);
++	job->needs_cache_clean = queue == V3D_CACHE_CLEAN;
+ 
+ 	ret = drm_sched_job_init(&job->base, &v3d_priv->sched_entity[queue],
+ 				 1, v3d_priv, file_priv->client_id);
+ 	if (ret)
+ 		return ret;
+@@ -227,17 +237,55 @@
+ 		if (ret)
+ 			goto fail_job_init;
+ 		job->has_pm_ref = true;
+ 	}
+ 
++	/* A queued job can outlive the file, including scheduler teardown.
++	 * These references remain held if its storage must be quarantined.
++	 */
++	__module_get(THIS_MODULE);
++	drm_dev_get(&v3d->drm);
++	get_device(v3d->drm.dev);
++	kref_get(&v3d_priv->refcount);
+ 	kref_init(&job->refcount);
+ 
+ 	return 0;
+ 
+ fail_job_init:
+ 	drm_sched_job_cleanup(&job->base);
+ 	return ret;
++}
++
++/* Reserve a real scheduler dependency before arm/push. Replacing an
++ * existing xarray entry cannot allocate. The placeholder also makes every
++ * pre-submit unwind use the normal scheduler dependency cleanup.
++ */
++static int
++v3d_reserve_chain_dependency(struct v3d_job *job, u32 *index)
++{
++	struct dma_fence *placeholder = dma_fence_get_stub();
++	int ret;
++
++	ret = xa_alloc(&job->base.dependencies, index, placeholder,
++		       xa_limit_32b, GFP_KERNEL);
++	if (ret)
++		dma_fence_put(placeholder);
++	return ret;
++}
++
++static void
++v3d_set_chain_dependency(struct v3d_job *job, u32 index,
++			 struct v3d_job *parent)
++{
++	struct dma_fence *placeholder;
++
++	/* The slot is reserved and job has not been pushed. No reader or
++	 * remover can race this replacement; no allocation can be needed.
++	 */
++	placeholder = xa_store(&job->base.dependencies, index,
++			       dma_fence_get(parent->done_fence), GFP_NOWAIT);
++	dma_fence_put(placeholder);
+ }
+ 
+ static void
+ v3d_push_job(struct v3d_job *job)
+ {
+@@ -325,10 +373,12 @@
+ 		v3d_job_deallocate((void *)clean_job);
+ 		return ret;
+ 	}
+ 
+ 	(*job)->args = *args;
++	/* Keep both parts of one invocation in the same reset epoch. */
++	(*clean_job)->reset_counter = (*job)->base.reset_counter;
+ 
+ 	ret = v3d_lookup_bos(&v3d->drm, file_priv, *clean_job,
+ 			     args->bo_handles, args->bo_handle_count);
+ 	if (ret)
+ 		return ret;
+@@ -934,10 +984,14 @@
+ 	struct v3d_job *clean_job = NULL;
+ 	struct v3d_job *last_job;
+ 	struct ww_acquire_ctx acquire_ctx;
+ 	int ret = 0;
+ 
++	ret = READ_ONCE(v3d->csd_error);
++	if (ret)
++		return ret;
++
+ 	trace_v3d_submit_cl_ioctl(&v3d->drm, args->rcl_start, args->rcl_end);
+ 
+ 	if (args->pad)
+ 		return -EINVAL;
+ 
+@@ -1031,10 +1085,13 @@
+ 			goto fail_perfmon;
+ 		}
+ 	}
+ 
+ 	mutex_lock(&v3d->sched_lock);
++	ret = READ_ONCE(v3d->csd_error);
++	if (ret)
++		goto fail_unreserve;
+ 	if (bin) {
+ 		bin->base.perfmon = render->base.perfmon;
+ 		v3d_perfmon_get(bin->base.perfmon);
+ 		v3d_push_job(&bin->base);
+ 
+@@ -1107,10 +1164,14 @@
+ 	struct ww_acquire_ctx acquire_ctx;
+ 	int ret = 0;
+ 
+ 	trace_v3d_submit_tfu_ioctl(&v3d->drm, args->iia);
+ 
++	ret = READ_ONCE(v3d->csd_error);
++	if (ret)
++		return ret;
++
+ 	if (args->flags && !(args->flags & DRM_V3D_SUBMIT_EXTENSION)) {
+ 		DRM_DEBUG("invalid flags: %d\n", args->flags);
+ 		return -EINVAL;
+ 	}
+ 
+@@ -1164,10 +1225,17 @@
+ 	ret = v3d_lock_bo_reservations(&job->base, &acquire_ctx);
+ 	if (ret)
+ 		goto fail;
+ 
+ 	mutex_lock(&v3d->sched_lock);
++	ret = READ_ONCE(v3d->csd_error);
++	if (ret) {
++		mutex_unlock(&v3d->sched_lock);
++		drm_gem_unlock_reservations(job->base.bo, job->base.bo_count,
++					    &acquire_ctx);
++		goto fail;
++	}
+ 	v3d_push_job(&job->base);
+ 	mutex_unlock(&v3d->sched_lock);
+ 
+ 	v3d_attach_fences_and_unlock_reservation(file_priv,
+ 						 &job->base, &acquire_ctx,
+@@ -1204,11 +1272,16 @@
+ 	struct drm_v3d_submit_csd *args = data;
+ 	struct v3d_submit_ext se = {0};
+ 	struct v3d_csd_job *job = NULL;
+ 	struct v3d_job *clean_job = NULL;
+ 	struct ww_acquire_ctx acquire_ctx;
++	u32 clean_dep;
+ 	int ret;
++
++	ret = READ_ONCE(v3d->csd_error);
++	if (ret)
++		return ret;
+ 
+ 	trace_v3d_submit_csd_ioctl(&v3d->drm, args->cfg[5], args->cfg[6]);
+ 
+ 	if (args->pad)
+ 		return -EINVAL;
+@@ -1249,18 +1322,21 @@
+ 			ret = -ENOENT;
+ 			goto fail_perfmon;
+ 		}
+ 	}
+ 
++	ret = v3d_reserve_chain_dependency(clean_job, &clean_dep);
++	if (ret)
++		goto fail_perfmon;
++
+ 	mutex_lock(&v3d->sched_lock);
++	ret = READ_ONCE(v3d->csd_error);
++	if (ret)
++		goto fail_unreserve;
+ 	v3d_push_job(&job->base);
+ 
+-	ret = drm_sched_job_add_dependency(&clean_job->base,
+-					   dma_fence_get(job->base.done_fence));
+-	if (ret)
+-		goto fail_unreserve;
+-
++	v3d_set_chain_dependency(clean_job, clean_dep, &job->base);
+ 	v3d_push_job(clean_job);
+ 	mutex_unlock(&v3d->sched_lock);
+ 
+ 	v3d_attach_fences_and_unlock_reservation(file_priv,
+ 						 clean_job,
+@@ -1315,11 +1391,16 @@
+ 	struct v3d_submit_ext *out_se = NULL;
+ 	struct v3d_cpu_job *cpu_job = NULL;
+ 	struct v3d_csd_job *csd_job = NULL;
+ 	struct v3d_job *clean_job = NULL;
+ 	struct ww_acquire_ctx acquire_ctx;
++	u32 csd_dep, clean_dep;
+ 	int ret;
++
++	ret = READ_ONCE(v3d->csd_error);
++	if (ret)
++		return ret;
+ 
+ 	if (args->flags && !(args->flags & DRM_V3D_SUBMIT_EXTENSION)) {
+ 		DRM_INFO("Invalid flags: %d\n", args->flags);
+ 		return -EINVAL;
+ 	}
+@@ -1371,26 +1452,29 @@
+ 		if (ret)
+ 			goto fail;
+ 	}
+ 
+ 	mutex_lock(&v3d->sched_lock);
++	ret = READ_ONCE(v3d->csd_error);
++	if (ret)
++		goto fail_unreserve;
++	if (clean_job) {
++		ret = v3d_reserve_chain_dependency(&csd_job->base, &csd_dep);
++		if (ret)
++			goto fail_unreserve;
++		ret = v3d_reserve_chain_dependency(clean_job, &clean_dep);
++		if (ret)
++			goto fail_unreserve;
++	}
+ 	v3d_push_job(&cpu_job->base);
+ 
+ 	switch (cpu_job->job_type) {
+ 	case V3D_CPU_JOB_TYPE_INDIRECT_CSD:
+-		ret = drm_sched_job_add_dependency(&csd_job->base.base,
+-						   dma_fence_get(cpu_job->base.done_fence));
+-		if (ret)
+-			goto fail_unreserve;
+-
++		v3d_set_chain_dependency(&csd_job->base, csd_dep, &cpu_job->base);
+ 		v3d_push_job(&csd_job->base);
+ 
+-		ret = drm_sched_job_add_dependency(&clean_job->base,
+-						   dma_fence_get(csd_job->base.done_fence));
+-		if (ret)
+-			goto fail_unreserve;
+-
++		v3d_set_chain_dependency(clean_job, clean_dep, &csd_job->base);
+ 		v3d_push_job(clean_job);
+ 
+ 		break;
+ 	default:
+ 		break;
+@@ -1422,15 +1506,17 @@
+ 	return 0;
+ 
+ fail_unreserve:
+ 	mutex_unlock(&v3d->sched_lock);
+ 
+-	drm_gem_unlock_reservations(cpu_job->base.bo, cpu_job->base.bo_count,
+-				    &acquire_ctx);
+-
+-	drm_gem_unlock_reservations(clean_job->bo, clean_job->bo_count,
+-				    &cpu_job->indirect_csd.acquire_ctx);
++	if (args->bo_handle_count)
++		drm_gem_unlock_reservations(cpu_job->base.bo, cpu_job->base.bo_count,
++					    &acquire_ctx);
++
++	if (clean_job)
++		drm_gem_unlock_reservations(clean_job->bo, clean_job->bo_count,
++					    &cpu_job->indirect_csd.acquire_ctx);
+ 
+ fail:
+ 	v3d_job_cleanup((void *)cpu_job);
+ 	v3d_job_cleanup((void *)csd_job);
+ 	v3d_job_cleanup(clean_job);
+--- a/drivers/gpu/drm/v3d/v3d_gem.c
++++ b/drivers/gpu/drm/v3d/v3d_gem.c
+@@ -208,45 +208,53 @@
+  * executed, we need to make sure that the clean is done before
+  * signaling job completion.  So, we synchronously wait before
+  * returning, and we make sure that L2 invalidates don't happen in the
+  * meantime to confuse our are-we-done checks.
+  */
+-void
++int
+ v3d_clean_caches(struct v3d_dev *v3d)
+ {
+ 	struct drm_device *dev = &v3d->drm;
+ 	int core = 0;
++	int ret = 0;
+ 
+ 	trace_v3d_cache_clean_begin(dev);
+ 
+ 	/* GFXH-1897: Ensure pending flushes complete before writing L2TCACTL */
+ 	if (v3d->ver < V3D_GEN_71) {
+ 		if (wait_for(!(V3D_CORE_READ(core, V3D_CTL_L2TCACTL) &
+ 			       V3D_L2TCACTL_L2TFLS), 100)) {
+ 			drm_err(dev, "Timeout waiting for L2T clean\n");
++			ret = -ETIMEDOUT;
++			goto out;
+ 		}
+ 	}
+ 
+ 	V3D_CORE_WRITE(core, V3D_CTL_L2TCACTL, V3D_L2TCACTL_TMUWCF);
+ 	if (wait_for(!(V3D_CORE_READ(core, V3D_CTL_L2TCACTL) &
+ 		       V3D_L2TCACTL_TMUWCF), 100)) {
+ 		DRM_ERROR("Timeout waiting for TMU write combiner flush\n");
++		ret = -ETIMEDOUT;
++		goto out;
+ 	}
+ 
+ 	mutex_lock(&v3d->cache_clean_lock);
+ 	V3D_CORE_WRITE(core, V3D_CTL_L2TCACTL,
+ 		       V3D_L2TCACTL_L2TFLS |
+ 		       V3D_SET_FIELD(V3D_L2TCACTL_FLM_CLEAN, V3D_L2TCACTL_FLM));
+ 
+ 	if (wait_for(!(V3D_CORE_READ(core, V3D_CTL_L2TCACTL) &
+ 		       V3D_L2TCACTL_L2TFLS), 100)) {
+ 		DRM_ERROR("Timeout waiting for L2T clean\n");
++		ret = -ETIMEDOUT;
+ 	}
+ 
+ 	mutex_unlock(&v3d->cache_clean_lock);
+ 
++out:
+ 	trace_v3d_cache_clean_end(dev);
++	return ret;
+ }
+ 
+ /* Invalidates the slice caches.  These are read-only caches. */
+ static void
+ v3d_invalidate_slices(struct v3d_dev *v3d, int core)
+--- a/drivers/gpu/drm/v3d/v3d_power.c
++++ b/drivers/gpu/drm/v3d/v3d_power.c
+@@ -50,12 +50,16 @@
+ 	struct v3d_dev *v3d = to_v3d_dev(drm);
+ 	int ret;
+ 
+ 	v3d_irq_disable(v3d);
+ 
+-	/* Always clean V3D caches on shutdown. */
+-	v3d_clean_caches(v3d);
++	/* A failed clean does not establish that powerdown is safe. */
++	ret = v3d_clean_caches(v3d);
++	if (ret) {
++		v3d_irq_enable(v3d);
++		return ret;
++	}
+ 
+ 	/* Wait until V3D has no active or pending AXI transactions. */
+ 	v3d_idle_axi(v3d, 0);
+ 	v3d_idle_gca(v3d);
+ 
+--- a/drivers/gpu/drm/v3d/v3d_sched.c
++++ b/drivers/gpu/drm/v3d/v3d_sched.c
+@@ -18,10 +18,12 @@
+  * semaphores to interlock between them.
+  */
+ 
+ #include <linux/sched/clock.h>
+ #include <linux/kthread.h>
++#include <linux/module.h>
++#include <drm/drm_drv.h>
+ 
+ #include <drm/drm_syncobj.h>
+ 
+ #include "v3d_drv.h"
+ #include "v3d_regs.h"
+@@ -63,14 +65,76 @@
+ to_cpu_job(struct drm_sched_job *sched_job)
+ {
+ 	return container_of(sched_job, struct v3d_cpu_job, base.base);
+ }
+ 
++/* Fatal containment deliberately has no release operation in contract v1.
++ * Keep the module, device and affected jobs (including BO/PM references) alive
++ * until reboot. An error-signaled fence reports failure, not safe reuse.
++ */
++void
++v3d_csd_poison_device(struct v3d_dev *v3d, int error)
++{
++	if (!cmpxchg(&v3d->csd_error, 0, error)) {
++		/* Live jobs already hold these owners across file close. Keep a
++		 * device-wide hold too; contract v1 has no recovery/unbind path.
++		 * These reference operations do not allocate and are IRQ-safe.
++		 */
++		__module_get(THIS_MODULE);
++		drm_dev_get(&v3d->drm);
++		get_device(v3d->drm.dev);
++		drm_err(&v3d->drm,
++			"Compute completion uncertain (%d); storage retained, reboot required\n",
++			error);
++	}
++}
++
++static void
++v3d_job_quarantine(struct v3d_job *job, int error)
++{
++	if (!job->quarantined) {
++		kref_get(&job->refcount);
++		job->quarantined = true;
++	}
++	v3d_csd_poison_device(job->v3d, error);
++}
++
++/* Scheduler dependencies establish ordering but do not propagate errors. */
++static int
++v3d_job_error(struct v3d_job *job)
++{
++	struct dma_fence *dependency;
++	unsigned long index;
++	int error = READ_ONCE(job->v3d->csd_error);
++
++	if (error)
++		return error;
++	if (job->reset_counter != READ_ONCE(job->v3d->reset_counter))
++		return -EIO;
++	if (job->base.s_fence->finished.error)
++		return job->base.s_fence->finished.error;
++	xa_for_each(&job->base.dependencies, index, dependency) {
++		error = dma_fence_get_status(dependency);
++		if (error < 0)
++			return error;
++	}
++	return 0;
++}
++
+ static void
+ v3d_sched_job_free(struct drm_sched_job *sched_job)
+ {
+ 	struct v3d_job *job = to_v3d_job(sched_job);
++
++	/* Scheduler cancellation can skip a clean after waiting for CSD.
++	 * The CSD IRQ alone does not establish cache-writeback completion.
++	 * Also retain jobs from an uncertain reset epoch for late IRQs.
++	 */
++	if ((job->needs_cache_clean && !job->cache_clean_complete) ||
++	    job->reset_counter != READ_ONCE(job->v3d->reset_counter) ||
++	    READ_ONCE(job->v3d->csd_error))
++		v3d_job_quarantine(job, -EIO);
+ 
+ 	v3d_job_cleanup(job);
+ }
+ 
+ void
+@@ -215,10 +279,13 @@
+ 	struct v3d_queue_state *queue = &v3d->queue[V3D_BIN];
+ 	struct drm_device *dev = &v3d->drm;
+ 	struct dma_fence *fence;
+ 	unsigned long irqflags;
+ 
++	if (READ_ONCE(v3d->csd_error))
++		return ERR_PTR(READ_ONCE(v3d->csd_error));
++
+ 	if (unlikely(job->base.base.s_fence->finished.error)) {
+ 		spin_lock_irqsave(&queue->queue_lock, irqflags);
+ 		queue->active_job = NULL;
+ 		spin_unlock_irqrestore(&queue->queue_lock, irqflags);
+ 		return NULL;
+@@ -274,10 +341,13 @@
+ 	struct v3d_render_job *job = to_render_job(sched_job);
+ 	struct v3d_dev *v3d = job->base.v3d;
+ 	struct drm_device *dev = &v3d->drm;
+ 	struct dma_fence *fence;
+ 
++	if (READ_ONCE(v3d->csd_error))
++		return ERR_PTR(READ_ONCE(v3d->csd_error));
++
+ 	if (unlikely(job->base.base.s_fence->finished.error)) {
+ 		v3d->queue[V3D_RENDER].active_job = NULL;
+ 		return NULL;
+ 	}
+ 
+@@ -321,10 +391,13 @@
+ {
+ 	struct v3d_tfu_job *job = to_tfu_job(sched_job);
+ 	struct v3d_dev *v3d = job->base.v3d;
+ 	struct drm_device *dev = &v3d->drm;
+ 	struct dma_fence *fence;
++
++	if (READ_ONCE(v3d->csd_error))
++		return ERR_PTR(READ_ONCE(v3d->csd_error));
+ 
+ 	if (unlikely(job->base.base.s_fence->finished.error)) {
+ 		v3d->queue[V3D_TFU].active_job = NULL;
+ 		return NULL;
+ 	}
+@@ -368,15 +441,16 @@
+ {
+ 	struct v3d_csd_job *job = to_csd_job(sched_job);
+ 	struct v3d_dev *v3d = job->base.v3d;
+ 	struct drm_device *dev = &v3d->drm;
+ 	struct dma_fence *fence;
+-	int i, csd_cfg0_reg;
+-
+-	if (unlikely(job->base.base.s_fence->finished.error)) {
+-		v3d->queue[V3D_CSD].active_job = NULL;
+-		return NULL;
++	int i, csd_cfg0_reg, error;
++
++	error = v3d_job_error(&job->base);
++	if (error) {
++		v3d_job_quarantine(&job->base, error);
++		return ERR_PTR(error);
+ 	}
+ 
+ 	/* The HW interprets a workgroup size of 0 as 65536; however, the
+ 	 * user-space driver exposes a maximum of 65535. Therefore, a 0 in
+ 	 * any dimension means that we have no workgroups and the compute
+@@ -385,17 +459,16 @@
+ 	if (!V3D_GET_FIELD(job->args.cfg[0], V3D_CSD_QUEUED_CFG0_NUM_WGS_X) ||
+ 	    !V3D_GET_FIELD(job->args.cfg[1], V3D_CSD_QUEUED_CFG1_NUM_WGS_Y) ||
+ 	    !V3D_GET_FIELD(job->args.cfg[2], V3D_CSD_QUEUED_CFG2_NUM_WGS_Z))
+ 		return NULL;
+ 
+-	v3d->queue[V3D_CSD].active_job = &job->base;
+-
+-	v3d_invalidate_caches(v3d);
+-
+ 	fence = v3d_fence_create(v3d, V3D_CSD);
+ 	if (IS_ERR(fence))
+-		return NULL;
++		return fence;
++
++	v3d->queue[V3D_CSD].active_job = &job->base;
++	v3d_invalidate_caches(v3d);
+ 
+ 	if (job->base.irq_fence)
+ 		dma_fence_put(job->base.irq_fence);
+ 	job->base.irq_fence = dma_fence_get(fence);
+ 
+@@ -682,11 +755,14 @@
+ static struct dma_fence *
+ v3d_cpu_job_run(struct drm_sched_job *sched_job)
+ {
+ 	struct v3d_cpu_job *job = to_cpu_job(sched_job);
+ 	struct v3d_dev *v3d = job->base.v3d;
+-
++	int error = v3d_job_error(&job->base);
++
++	if (error)
++		return ERR_PTR(error);
+ 	if (job->job_type >= ARRAY_SIZE(cpu_job_function)) {
+ 		DRM_DEBUG_DRIVER("Unknown CPU job: %d\n", job->job_type);
+ 		return NULL;
+ 	}
+ 
+@@ -705,31 +781,42 @@
+ static struct dma_fence *
+ v3d_cache_clean_job_run(struct drm_sched_job *sched_job)
+ {
+ 	struct v3d_job *job = to_v3d_job(sched_job);
+ 	struct v3d_dev *v3d = job->v3d;
++	int error = v3d_job_error(job);
++
++	if (error)
++		goto quarantine;
+ 
+ 	v3d_job_start_stats(job, V3D_CACHE_CLEAN);
+-
+-	v3d_clean_caches(v3d);
+-
++	error = v3d_clean_caches(v3d);
+ 	v3d_job_update_stats(job, V3D_CACHE_CLEAN);
+ 
+-	/* Synchronous operation, so no fence to wait on. */
++	if (!error)
++		error = v3d_job_error(job);
++	if (error)
++		goto quarantine;
++
++	job->cache_clean_complete = true;
+ 	return NULL;
++
++quarantine:
++	v3d_job_quarantine(job, error);
++	return ERR_PTR(error);
+ }
+ 
+ static enum drm_gpu_sched_stat
+ v3d_gpu_reset_for_timeout(struct v3d_dev *v3d, struct drm_sched_job *sched_job,
+ 			  enum v3d_queue q)
+ {
+ 	struct v3d_job *job = to_v3d_job(sched_job);
+-	struct v3d_file_priv *v3d_priv = job->file_priv;
+ 	unsigned long irqflags;
+ 	enum v3d_queue i;
+ 
+ 	mutex_lock(&v3d->reset_lock);
++	v3d_job_quarantine(job, -ETIMEDOUT);
+ 
+ 	/* block scheduler */
+ 	for (i = 0; i < V3D_MAX_QUEUES; i++)
+ 		drm_sched_stop(&v3d->queue[i].sched, sched_job);
+ 
+@@ -739,12 +826,12 @@
+ 	/* get the GPU back into the init state */
+ 	v3d_reset(v3d);
+ 
+ 	v3d->reset_counter++;
+ 	spin_lock_irqsave(&v3d->queue[q].queue_lock, irqflags);
+-	if (v3d_priv)
+-		v3d_priv->reset_counter++;
++	if (job->file_priv)
++		job->file_priv->reset_counter++;
+ 	spin_unlock_irqrestore(&v3d->queue[q].queue_lock, irqflags);
+ 
+ 	for (i = 0; i < V3D_MAX_QUEUES; i++)
+ 		drm_sched_resubmit_jobs(&v3d->queue[i].sched);
+ 
+--- a/drivers/gpu/drm/v3d/v3d_irq.c
++++ b/drivers/gpu/drm/v3d/v3d_irq.c
+@@ -86,16 +86,26 @@
+ static void
+ v3d_irq_signal_fence(struct v3d_dev *v3d, enum v3d_queue q,
+ 		     void (*trace_irq)(struct drm_device *, uint64_t))
+ {
+ 	struct v3d_queue_state *queue = &v3d->queue[q];
+-	struct v3d_fence *fence = to_v3d_fence(queue->active_job->irq_fence);
+-
+-	v3d_job_update_stats(queue->active_job, q);
++	struct v3d_job *job = READ_ONCE(queue->active_job);
++	struct v3d_fence *fence;
++	int error;
++
++	if (!job)
++		return;
++	fence = to_v3d_fence(job->irq_fence);
++
++	v3d_job_update_stats(job, q);
+ 	trace_irq(&v3d->drm, fence->seqno);
+ 
+ 	queue->active_job = NULL;
++
++	error = READ_ONCE(v3d->csd_error);
++	if (error && !dma_fence_is_signaled(&fence->base))
++		dma_fence_set_error(&fence->base, error);
+ 	dma_fence_signal(&fence->base);
+ }
+ 
+ static irqreturn_t
+ v3d_irq(int irq, void *arg)
+@@ -135,12 +145,14 @@
+ 	}
+ 
+ 	/* We shouldn't be triggering these if we have GMP in
+ 	 * always-allowed mode.
+ 	 */
+-	if (v3d->ver < V3D_GEN_71 && (intsts & V3D_INT_GMPV))
++	if (v3d->ver < V3D_GEN_71 && (intsts & V3D_INT_GMPV)) {
++		v3d_csd_poison_device(v3d, -EFAULT);
+ 		dev_err(v3d->drm.dev, "GMP violation\n");
++	}
+ 
+ 	/* V3D 4.2 wires the hub and core IRQs together, so if we &
+ 	 * didn't see the common one then check hub for MMU IRQs.
+ 	 */
+ 	if (v3d->single_irq_line && status == IRQ_NONE)
+@@ -197,10 +209,11 @@
+ 			{0x7F, 0x80, "GMP"},
+ 		};
+ 		const char *client = "?";
+ 		static bool logged_error;
+ 
++		v3d_csd_poison_device(v3d, -EFAULT);
+ 		V3D_WRITE(V3D_MMU_CTL, V3D_READ(V3D_MMU_CTL));
+ 
+ 		if (v3d->ver >= V3D_GEN_71) {
+ 			size_t i;
+ 
+@@ -239,10 +252,11 @@
+ 
+ 		status = IRQ_HANDLED;
+ 	}
+ 
+ 	if (v3d->ver >= V3D_GEN_71 && (intsts & V3D_V7_HUB_INT_GMPV)) {
++		v3d_csd_poison_device(v3d, -EFAULT);
+ 		dev_err(v3d->drm.dev, "GMP Violation\n");
+ 		status = IRQ_HANDLED;
+ 	}
+ 
+ 	return status;

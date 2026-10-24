@@ -1,0 +1,6 @@
+fa3-fwd; sys_platform == "never"
+flashinfer-python; sys_platform == "never"
+triton; sys_platform == "never"
+mooncake-transfer-engine; sys_platform == "never"
+torchcodec; sys_platform == "never"
+vllm-xpu-kernels; sys_platform == "never"
