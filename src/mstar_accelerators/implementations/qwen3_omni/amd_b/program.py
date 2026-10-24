@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import Any
 import torch
 from torch import nn
+from .cp_kernels import cp_embed_accumulate
 
 from mstar.communication.tensors import NameToTensorList
 from mstar.engine.accelerator_graph_config import (
@@ -245,9 +246,9 @@ class TalkerProgram(nn.Module):
         )
 
         # code predictor section
-        embed = self.talker_code_emb(layer0_codes)  # [bs, hidden]
-        codec_emb_sum.add_(embed)
-        all_codes[:, 0] = layer0_codes
+        embed = cp_embed_accumulate(
+            layer0_codes, self.talker_code_emb.weight, codec_emb_sum, all_codes, 0,
+        )
         bs = all_codes.shape[0]
 
         kv_cache = self._get_cp_kv_cache()[:, :bs]
@@ -277,9 +278,10 @@ class TalkerProgram(nn.Module):
             tokens = code_pred_sampler.sample(
                 request_ids, logits,
             )
-            all_codes[:, group_idx] = tokens
-            embed = codec_embedding[group_idx - 1](tokens)
-            codec_emb_sum.add_(embed)
+            embed = cp_embed_accumulate(
+                tokens, codec_embedding[group_idx - 1].weight,
+                codec_emb_sum, all_codes, group_idx,
+            )
 
         return {
             "codec_embeds": [codec_emb_sum],
