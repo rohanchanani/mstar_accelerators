@@ -1,3 +1,8 @@
+Decode text projection is separately adapted from Joseph Tan commit
+3f10d2464ec881cf9b65bf8f18104d9b97f935f8. The logical model continues to own
+text/EOS/pad selection and once-only EOS state; the acceleration now collects
+the raw rows and performs one batched projection in its captured forward.
+
 # B predictor ports
 
 The fused helper is copied verbatim from Joseph Tan (dghosef/mstar), commit

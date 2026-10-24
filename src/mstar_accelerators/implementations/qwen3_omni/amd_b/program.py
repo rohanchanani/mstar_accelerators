@@ -164,12 +164,24 @@ class TalkerProgram(nn.Module):
         seq_lens = [
             inp.input_seq_len for inp in inputs
         ]
-        input_embeds = torch.cat([
-            self._materialize_input_embeds(graph_walk, inp) for inp in inputs
-        ], dim=0)
-        device = self.get_device()
-
         extra_args = {}
+        if graph_walk == "talker_decode":
+            dtype = self.model.text_projection.linear_fc1.weight.dtype
+            input_embeds = torch.cat([inp.input_embeds for inp in inputs], dim=0).to(dtype)
+            raw_rows = []
+            for inp in inputs:
+                kind = inp.kwargs.get("conditioning_kind", "text")
+                if kind == "text":
+                    raw_rows.append(inp.tensor_inputs["thinker_states"])
+                else:
+                    index = {"pad": 0, "eos": 2}[kind]
+                    raw_rows.append(self._tts_raw_embeddings[index:index + 1])
+            extra_args["text_raw"] = torch.cat(raw_rows, dim=0).to(dtype)
+        else:
+            input_embeds = torch.cat([
+                self._materialize_input_embeds(graph_walk, inp) for inp in inputs
+            ], dim=0)
+        device = self.get_device()
         # codec scratch is decode-only; talker_prefill runs the LLM backbone
         # alone and interning these would clash (codec_emb_sum's hidden dim
         # aliases the token-bucket seq dim).
@@ -192,6 +204,14 @@ class TalkerProgram(nn.Module):
             "input_embeds": input_embeds,
             **extra_args
         }
+
+
+    def _add_text_conditioning(
+        self, input_embeds: torch.Tensor, text_raw: torch.Tensor | None,
+    ) -> torch.Tensor:
+        if text_raw is None:
+            return input_embeds
+        return input_embeds + self.model.text_projection(text_raw)
 
 
     def _forward_prefill(
@@ -302,6 +322,7 @@ class TalkerProgram(nn.Module):
             return self._forward_prefill(
                 input_embeds=input_embeds
             )
+        input_embeds = self._add_text_conditioning(input_embeds, kwargs.pop("text_raw", None))
         output = self._forward_decode_like(
             request_ids=engine_inputs.request_ids,
             talker_sampler=engine_inputs.resources[TALKER_SAMPLER],
@@ -348,6 +369,7 @@ class TalkerProgram(nn.Module):
             }
 
         last_token_indices = kwargs.pop("last_token_indices", None)
+        input_embeds = self._add_text_conditioning(input_embeds, kwargs.pop("text_raw", None))
         if graph_walk == "talker_last_prefill":
             assert last_token_indices is not None, (
                 "talker_last_prefill forward_batched requires "
