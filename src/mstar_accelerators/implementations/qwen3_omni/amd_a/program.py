@@ -284,7 +284,8 @@ class TalkerProgram(nn.Module):
         return {
             "codec_embeds": [codec_emb_sum],
             "codec_tokens": [all_codes],
-            "tokens": [layer0_codes]
+            # Eager ROCm sampling returns int32; logical token outputs are int64.
+            "tokens": [layer0_codes.to(torch.long)]
         }
 
 
