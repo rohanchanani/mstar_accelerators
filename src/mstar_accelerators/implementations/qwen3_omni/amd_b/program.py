@@ -5,27 +5,42 @@ interpretation, stopping, resource admission and commit stay with MStar.
 """
 from __future__ import annotations
 
-from typing import Any
-import torch
-from torch import nn
-from .cp_kernels import cp_embed_accumulate
+from typing import Any, ClassVar
 
+import torch
 from mstar.communication.tensors import NameToTensorList
 from mstar.engine.accelerator_graph_config import (
-    AcceleratorGraphConfig, BatchedAcceleratorGraphConfig, PackedAcceleratorGraphConfig,
+    AcceleratorGraphConfig,
+    BatchedAcceleratorGraphConfig,
+    PackedAcceleratorGraphConfig,
 )
 from mstar.engine.resources.sampler.resource import SamplerResource
-from mstar.model.qwen3_omni.config import CODE_PRED_SAMPLER, TALKER_SAMPLER, Qwen3OmniModelConfig
-from mstar.model.qwen3_omni.logical import LAST_PREFILL_TOKENS_PER_REQUEST, codec_prefix_ids
-from mstar.model.submodule_base import ARNodeInputs, BatchedModelOutput, ModelInputsFromEngine, NodeInputs
+from mstar.model.qwen3_omni.config import (
+    CODE_PRED_SAMPLER,
+    TALKER_SAMPLER,
+    Qwen3OmniModelConfig,
+)
+from mstar.model.qwen3_omni.logical import (
+    LAST_PREFILL_TOKENS_PER_REQUEST,
+    codec_prefix_ids,
+)
+from mstar.model.submodule_base import (
+    ARNodeInputs,
+    BatchedModelOutput,
+    ModelInputsFromEngine,
+    NodeInputs,
+)
+from torch import nn
+
+from .cp_kernels import cp_embed_accumulate
 
 
 class TalkerProgram(nn.Module):
     MAX_BATCH_SIZE = 32
-    TALKER_PREFILL_TOKEN_BUCKETS = [128, 256, 512, 1024]
-    TALKER_PREFILL_CAPTURE_BATCH_SIZES = [1, 2, 4]
+    TALKER_PREFILL_TOKEN_BUCKETS: ClassVar[list[int]] = [128, 256, 512, 1024]
+    TALKER_PREFILL_CAPTURE_BATCH_SIZES: ClassVar[list[int]] = [1, 2, 4]
     TALKER_LAST_PREFILL_TOKENS_PER_REQ = LAST_PREFILL_TOKENS_PER_REQUEST
-    TALKER_LAST_PREFILL_CAPTURE_BATCH_SIZES = [1, 2, 4, 8, 16, 32]
+    TALKER_LAST_PREFILL_CAPTURE_BATCH_SIZES: ClassVar[list[int]] = [1, 2, 4, 8, 16, 32]
 
     def __init__(self, talker_model, code_predictor, raw_conditioning, config: Qwen3OmniModelConfig):
         super().__init__()

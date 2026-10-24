@@ -22,14 +22,22 @@ from __future__ import annotations
 
 import torch
 import torch.nn.functional as F
-from torch import nn
-
 from mstar.distributed.communication import CommGroup
 from mstar.model.components import ParallelSparseMoeBlockWithSharedExpert, RMSNorm
 from mstar.model.components.distributed import ParallelGatedMLP
-from .cp_kernels import cp_qk_norm_rope_kv_write
+from mstar.model.qwen3_omni.config import (
+    TALKER_ATTN,
+    TALKER_KV,
+    TALKER_POS,
+    Qwen3OmniModelConfig,
+    TalkerTextConfig,
+)
+from torch import nn
+
 from .attention import Qwen3OmniAttention
-from mstar.model.qwen3_omni.config import TALKER_ATTN, TALKER_KV, TALKER_POS, Qwen3OmniModelConfig, TalkerTextConfig
+from .cp_kernels import cp_qk_norm_rope_kv_write
+
+
 def fused_qk_norm_rope(*args, **kwargs):
     from mstar.utils.attention import fused_qk_norm_rope as kernel
     return kernel(*args, **kwargs)
@@ -492,7 +500,7 @@ class Qwen3OmniCodePredictor(nn.Module):
             for applying the per-codebook LM head.
         """
         hidden_states = inputs_embeds
-        bs, seq_len, hidden_size = hidden_states.shape
+        bs, seq_len, _hidden_size = hidden_states.shape
 
         first_attn = self.model.layers[0].self_attn
         n_kv_heads = first_attn.num_kv_heads
