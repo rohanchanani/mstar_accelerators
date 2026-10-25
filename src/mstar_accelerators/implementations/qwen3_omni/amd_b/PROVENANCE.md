@@ -90,3 +90,5 @@ Source review separately verifies the copied numerical class bodies against the
 supplied A donor. These checks do not establish ROCm kernel correctness, graph
 capture/replay, actual checkpoint speech quality, or AMD performance. Those
 remain requirements of the hardware qualification run.
+
+Accepted A repair integration (2026-10-25 UTC): initial-prefill BF16 router consistency from b2def1a73895c268beee91939fa36f0e249d8d94. B reuses amd_a.router_consistency and its custom-op registration. Both initial-prefill entry points opt in; last-prefill/decode are unchanged. Joseph Tan fusion and projection ports above are retained unchanged. Runtime/scheduler/capabilities are unchanged.

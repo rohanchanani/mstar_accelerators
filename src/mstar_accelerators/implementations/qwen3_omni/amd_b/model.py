@@ -23,7 +23,7 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 from mstar.distributed.communication import CommGroup
-from mstar.model.components import ParallelSparseMoeBlockWithSharedExpert, RMSNorm
+from mstar.model.components import RMSNorm
 from mstar.model.components.distributed import ParallelGatedMLP
 from mstar.model.qwen3_omni.config import (
     TALKER_ATTN,
@@ -34,6 +34,7 @@ from mstar.model.qwen3_omni.config import (
 )
 from torch import nn
 
+from ..amd_a.router_consistency import ConsistentBF16Router, PrefillConsistentMoe
 from .attention import Qwen3OmniAttention
 from .cp_kernels import cp_qk_norm_rope_kv_write
 
@@ -106,7 +107,13 @@ class Qwen3OmniTalkerLayer(nn.Module):
         )
         self.post_attention_layernorm = RMSNorm(hidden_size, rms_norm_eps)
 
-        self.mlp = ParallelSparseMoeBlockWithSharedExpert(
+        self.mlp = PrefillConsistentMoe(
+            router=ConsistentBF16Router(
+                hidden_size=hidden_size,
+                num_experts=config.num_experts,
+                num_experts_per_tok=config.num_experts_per_tok,
+                norm_topk_prob=config.norm_topk_prob,
+            ),
             hidden_size=hidden_size,
             moe_intermediate_size=config.moe_intermediate_size,
             num_experts=config.num_experts,
@@ -125,6 +132,7 @@ class Qwen3OmniTalkerLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
+        *, consistent_prefill: bool = False,
     ) -> torch.Tensor:
         # ---------- self-attention with pre-norm ----------
         residual = hidden_states
@@ -135,7 +143,7 @@ class Qwen3OmniTalkerLayer(nn.Module):
         # ---------- MoE FFN with pre-norm ----------
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
+        hidden_states = self.mlp(hidden_states, consistent_prefill=consistent_prefill)
         hidden_states = residual + hidden_states
 
         return hidden_states
@@ -175,6 +183,7 @@ class Qwen3OmniTalkerLanguageModel(nn.Module):
         self,
         input_embeds: torch.Tensor,
         label: str = "main",
+        consistent_prefill: bool = False,
     ) -> torch.Tensor:
         hidden_states = input_embeds
         # The label and layer index are cursors on the shared resources: bind
@@ -183,7 +192,7 @@ class Qwen3OmniTalkerLanguageModel(nn.Module):
         self.layers[0].self_attn.attend.bind_step(label)
         for layer_idx, decoder_layer in enumerate(self.layers):
             decoder_layer.self_attn.attend.set_layer_idx(layer_idx)
-            hidden_states = decoder_layer(hidden_states=hidden_states)
+            hidden_states = decoder_layer(hidden_states=hidden_states, consistent_prefill=consistent_prefill)
 
         hidden_states = self.norm(hidden_states)
         return hidden_states
@@ -249,6 +258,7 @@ class Qwen3OmniTalkerModel(nn.Module):
         self,
         input_embeds: torch.Tensor,
         label: str = "main",
+        consistent_prefill: bool = False,
     ) -> torch.Tensor:
         """Run the Talker backbone and return the final hidden states.
 
@@ -264,7 +274,7 @@ class Qwen3OmniTalkerModel(nn.Module):
             hidden_states: [total_tokens, hidden_size] after final RMS norm.
         """
         return self.model(
-            input_embeds=input_embeds, label=label,
+            input_embeds=input_embeds, label=label, consistent_prefill=consistent_prefill,
         )
 
 

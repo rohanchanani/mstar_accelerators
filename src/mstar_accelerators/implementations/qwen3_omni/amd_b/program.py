@@ -233,7 +233,7 @@ class TalkerProgram(nn.Module):
         self, input_embeds: torch.Tensor,
     ):
         self.model(
-            input_embeds=input_embeds, label="main",
+            input_embeds=input_embeds, label="main", consistent_prefill=True,
         )
         return {}
 
@@ -378,6 +378,7 @@ class TalkerProgram(nn.Module):
             hidden = self.model(
                 input_embeds=input_embeds,
                 label="main",
+                consistent_prefill=True,
             )
             return {
                 "__batched_talker_prefill_hidden__": hidden,
