@@ -39,6 +39,7 @@ from .attention import Qwen3OmniAttention
 from .cp_kernels import cp_qk_norm_rope_kv_write
 from .rounded_norm import rounded_add_norm
 from .region_mlp import PredictorRegionMLP
+from .finish_norm import predictor_mlp_next_norm
 
 
 def fused_qk_norm_rope(*args, **kwargs):
@@ -384,6 +385,7 @@ class Qwen3OmniCodePredictorInnerModel(nn.Module):
 
 
 class Qwen3OmniCodePredictor(nn.Module):
+    finish_norm_enabled = True
     """Code Predictor: lightweight transformer for residual codebook layers.
 
     HF weight layout (published checkpoint has 15 residual heads)::
@@ -531,9 +533,16 @@ class Qwen3OmniCodePredictor(nn.Module):
         flat_pos = position_ids.reshape(-1)
 
         fuse_residual_norm = self.model.layers[0].rounded_norm_enabled
+        fuse_mlp_finish = (
+            self.finish_norm_enabled and fuse_residual_norm and bs * seq_len in (4, 8)
+            and all(layer.mlp.region_supported(inputs_embeds) for layer in self.model.layers)
+        )
         for layer_idx, layer in enumerate(self.model.layers):
             attn = layer.self_attn
-            if fuse_residual_norm and layer_idx > 0:
+            if fuse_mlp_finish and layer_idx > 0:
+                # The preceding MLP already produced this layer's normalized input.
+                pass
+            elif fuse_residual_norm and layer_idx > 0:
                 # Consume the previous MLP's delta while preserving its BF16 sum.
                 hidden_states, residual = rounded_add_norm(
                     residual, hidden_states, layer.input_layernorm.weight,
@@ -572,11 +581,20 @@ class Qwen3OmniCodePredictor(nn.Module):
                 hidden_states = residual + attn.o_proj(attn_out)
                 residual = hidden_states
                 hidden_states = layer.post_attention_layernorm(hidden_states)
-            hidden_states = layer.mlp(hidden_states)
+            if fuse_mlp_finish:
+                next_norm = self.model.layers[layer_idx + 1].input_layernorm if layer_idx + 1 < len(self.model.layers) else self.model.norm
+                hidden_states, residual = predictor_mlp_next_norm(
+                    hidden_states, layer.mlp.gate_up_proj.weight, layer.mlp.down_proj.weight,
+                    residual, next_norm.weight, next_norm.variance_epsilon,
+                )
+            else:
+                hidden_states = layer.mlp(hidden_states)
             if not fuse_residual_norm:
                 hidden_states = residual + hidden_states
 
         # The last MLP's sum feeds the model norm rather than another layer.
+        if fuse_mlp_finish:
+            return hidden_states
         if fuse_residual_norm:
             hidden_states, _ = rounded_add_norm(
                 residual, hidden_states, self.model.norm.weight,

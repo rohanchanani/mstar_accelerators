@@ -92,9 +92,27 @@ def full_region(x,wg,wd,bi=16,bo=256,warps=4):
 from mstar.model.components.distributed import ParallelGatedMLP
 class PredictorRegionMLP(ParallelGatedMLP):
     region_enabled=True
+
+    def region_supported(self, x):
+        gate_up = self.gate_up_proj.weight
+        down = self.down_proj.weight
+        return (
+            self.hidden_size == 1024 and self.intermediate_size == 3072
+            and x.ndim >= 1 and x.shape[-1] == 1024
+            and x.numel() // 1024 in (1, 2, 4, 8)
+            and x.device.type == "cuda" and x.dtype == torch.bfloat16
+            and x.is_contiguous()
+            and gate_up.shape == (6144, 1024) and down.shape == (1024, 3072)
+            and gate_up.dtype == down.dtype == x.dtype
+            and gate_up.device == down.device == x.device
+            and gate_up.is_contiguous() and down.is_contiguous()
+            and self.gate_up_proj.bias is None and self.down_proj.bias is None
+            and self.act is torch.nn.functional.silu
+        )
+
     def forward(self,x):
-        m=x.numel()//self.hidden_size
-        if self.region_enabled and self.hidden_size==1024 and self.intermediate_size==3072 and m in (1,2,4,8):
-            cfg=('vec',4,1024,4,4,4096,4,1) if m<=2 else ('dot',16,128,2,32,128,2,8)
+        if self.region_enabled and self.region_supported(x):
+            m=x.numel()//1024
+            cfg=("vec",4,1024,4,4,4096,4,1) if m<=2 else ("dot",16,128,2,32,128,2,8)
             return region(x,self.gate_up_proj.weight,self.down_proj.weight,cfg)
         return super().forward(x)
