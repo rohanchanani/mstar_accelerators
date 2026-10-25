@@ -40,6 +40,7 @@ from .cp_kernels import cp_qk_norm_rope_kv_write
 from .rounded_norm import rounded_add_norm
 from .region_mlp import PredictorRegionMLP
 from .finish_norm import predictor_mlp_next_norm
+from .short_attention import short_decode_attn_nhd
 
 
 def fused_qk_norm_rope(*args, **kwargs):
@@ -407,6 +408,7 @@ class Qwen3OmniCodePredictor(nn.Module):
     def __init__(self, config: Qwen3OmniModelConfig):
         super().__init__()
         cp = config.code_predictor
+        self.short_attention_enabled = True
 
         self.model = Qwen3OmniCodePredictorInnerModel(config)
 
@@ -567,9 +569,8 @@ class Qwen3OmniCodePredictor(nn.Module):
             k_full = kv_cache[layer_idx, :, 0]
             v_full = kv_cache[layer_idx, :, 1]
 
-            attn_out = decode_attn_nhd(
-                q, k_full, v_full, valid_len
-            )
+            attention = short_decode_attn_nhd if self.short_attention_enabled else decode_attn_nhd
+            attn_out = attention(q, k_full, v_full, valid_len)
             attn_out = attn_out.reshape(bs, seq_len, -1)
             # Preserve B's BF16 add boundary before normalization.
             if layer.rounded_norm_enabled:
