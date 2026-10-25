@@ -36,6 +36,7 @@ from torch import nn
 
 from ..amd_a.router_consistency import ConsistentBF16Router, PrefillConsistentMoe
 from .attention import Qwen3OmniAttention
+from .attention_projection import attention_projection_norm
 from .cp_kernels import cp_qk_norm_rope_kv_write
 from .finish_norm import predictor_mlp_next_norm
 from .region_mlp import PredictorRegionMLP
@@ -409,6 +410,7 @@ class Qwen3OmniCodePredictor(nn.Module):
         super().__init__()
         cp = config.code_predictor
         self.short_attention_enabled = True
+        self.attention_projection_fusion_enabled = True
 
         self.model = Qwen3OmniCodePredictorInnerModel(config)
 
@@ -570,19 +572,28 @@ class Qwen3OmniCodePredictor(nn.Module):
             k_full = kv_cache[layer_idx, :, 0]
             v_full = kv_cache[layer_idx, :, 1]
 
-            attention = short_decode_attn_nhd if self.short_attention_enabled else decode_attn_nhd
-            attn_out = attention(q, k_full, v_full, valid_len)
-            attn_out = attn_out.reshape(bs, seq_len, -1)
-            # Preserve B's BF16 add boundary before normalization.
-            if layer.rounded_norm_enabled:
-                hidden_states, residual = rounded_add_norm(
-                    residual, attn.o_proj(attn_out), layer.post_attention_layernorm.weight,
+            if (self.attention_projection_fusion_enabled and self.short_attention_enabled
+                    and bs in (1, 2) and seq_len == 1 and valid_len <= 16
+                    and layer.rounded_norm_enabled):
+                hidden_states, residual = attention_projection_norm(
+                    q, k_full, v_full, attn.o_proj.weight, residual,
+                    layer.post_attention_layernorm.weight, valid_len,
                     layer.post_attention_layernorm.variance_epsilon,
                 )
             else:
-                hidden_states = residual + attn.o_proj(attn_out)
-                residual = hidden_states
-                hidden_states = layer.post_attention_layernorm(hidden_states)
+                attention = short_decode_attn_nhd if self.short_attention_enabled else decode_attn_nhd
+                attn_out = attention(q, k_full, v_full, valid_len)
+                attn_out = attn_out.reshape(bs, seq_len, -1)
+                # Preserve B's BF16 add boundary before normalization.
+                if layer.rounded_norm_enabled:
+                    hidden_states, residual = rounded_add_norm(
+                        residual, attn.o_proj(attn_out), layer.post_attention_layernorm.weight,
+                        layer.post_attention_layernorm.variance_epsilon,
+                    )
+                else:
+                    hidden_states = residual + attn.o_proj(attn_out)
+                    residual = hidden_states
+                    hidden_states = layer.post_attention_layernorm(hidden_states)
             if fuse_mlp_finish:
                 next_norm = self.model.layers[layer_idx + 1].input_layernorm if layer_idx + 1 < len(self.model.layers) else self.model.norm
                 hidden_states, residual = predictor_mlp_next_norm(
