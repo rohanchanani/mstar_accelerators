@@ -38,6 +38,7 @@ from ..amd_a.router_consistency import ConsistentBF16Router, PrefillConsistentMo
 from .attention import Qwen3OmniAttention
 from .cp_kernels import cp_qk_norm_rope_kv_write
 from .rounded_norm import rounded_add_norm
+from .region_mlp import PredictorRegionMLP
 
 
 def fused_qk_norm_rope(*args, **kwargs):
@@ -307,7 +308,7 @@ class Qwen3OmniCodePredictorLayer(nn.Module):
             use_mrope=False,
         )
         self.post_attention_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps)
-        self.mlp = ParallelGatedMLP(
+        self.mlp = PredictorRegionMLP(
             hidden_size=hidden_size, intermediate_size=intermediate_size,
             activation="silu",
         )
