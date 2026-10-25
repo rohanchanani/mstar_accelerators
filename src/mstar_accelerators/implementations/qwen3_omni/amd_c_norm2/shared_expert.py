@@ -16,6 +16,7 @@ from mstar.model.components.distributed.linear import (
 from mstar.model.components.moe import _dispatch
 
 from ..amd_a.router_consistency import PrefillConsistentMoe
+from .shared_prefill import _finish_mfma, _prepare_mfma
 
 
 @tr.jit
@@ -66,6 +67,7 @@ def _finish(A, W, G, ROUTED, O, BN: tl.constexpr):
 
 class SharedRegionMoe(PrefillConsistentMoe):
     shared_region_enabled = True
+    shared_prefill_enabled = True
 
     def _eligible(self, x):
         shared = self.shared_expert
@@ -87,7 +89,9 @@ class SharedRegionMoe(PrefillConsistentMoe):
             return False
         if any(mod.bias is not None for mod in (gu, down, sg)):
             return False
-        if x.shape[-1] != 1024 or x.numel() // 1024 not in (1, 2, 4, 8):
+        if x.shape[-1] != 1024 or x.numel() // 1024 not in (1, 2, 4, 8, 24, 48):
+            return False
+        if x.numel() // 1024 in (24, 48) and not self.shared_prefill_enabled:
             return False
         if not x.is_cuda or not torch.version.hip or torch.is_grad_enabled():
             return False
@@ -107,24 +111,45 @@ class SharedRegionMoe(PrefillConsistentMoe):
         )
 
     def forward(self, hidden_states, *, consistent_prefill=False):
-        if consistent_prefill or not self._eligible(hidden_states):
+        if (
+            consistent_prefill and hidden_states.numel() // 1024 not in (24, 48)
+        ) or not self._eligible(hidden_states):
             return super().forward(hidden_states, consistent_prefill=consistent_prefill)
         shape = hidden_states.shape
         flat = hidden_states.view(-1, 1024)
         m = flat.shape[0]
         intermediate = torch.empty((m, 768), device=flat.device, dtype=flat.dtype)
         gate = torch.empty((m,), device=flat.device, dtype=flat.dtype)
-        _prepare[(384, m)](
-            flat,
-            self.shared_expert.gate_up_proj.weight,
-            self.shared_expert_gate.weight,
-            intermediate,
-            gate,
-            2,
-            num_warps=1,
-            enable_fp_fusion=False,
-        )
-        routing_weights, selected_experts, _ = self.gate(flat, None)
+        if m in (24, 48):
+            _prepare_mfma[(48, tr.cdiv(m, 16))](
+                flat,
+                self.shared_expert.gate_up_proj.weight,
+                self.shared_expert_gate.weight,
+                intermediate,
+                gate,
+                m,
+                num_warps=2,
+                num_stages=2,
+                matrix_instr_nonkdim=16,
+                enable_fp_fusion=False,
+            )
+        else:
+            _prepare[(384, m)](
+                flat,
+                self.shared_expert.gate_up_proj.weight,
+                self.shared_expert_gate.weight,
+                intermediate,
+                gate,
+                2,
+                num_warps=1,
+                enable_fp_fusion=False,
+            )
+        if consistent_prefill:
+            routing_weights, selected_experts, _ = self.gate(
+                flat, consistent_prefill=True
+            )
+        else:
+            routing_weights, selected_experts, _ = self.gate(flat, None)
         routed = _dispatch(
             flat,
             self.experts.gate_up_proj,
@@ -146,14 +171,28 @@ class SharedRegionMoe(PrefillConsistentMoe):
             shared_gate = torch.sigmoid(self.shared_expert_gate(flat))
             return (routed + shared_gate * shared).view(shape)
         out = torch.empty_like(flat)
-        _finish[(512, m)](
-            intermediate,
-            self.shared_expert.down_proj.weight,
-            gate,
-            routed,
-            out,
-            2,
-            num_warps=1,
-            enable_fp_fusion=False,
-        )
+        if m in (24, 48):
+            _finish_mfma[(64, tr.cdiv(m, 16))](
+                intermediate,
+                self.shared_expert.down_proj.weight,
+                gate,
+                routed,
+                out,
+                m,
+                num_warps=2,
+                num_stages=2,
+                matrix_instr_nonkdim=16,
+                enable_fp_fusion=False,
+            )
+        else:
+            _finish[(512, m)](
+                intermediate,
+                self.shared_expert.down_proj.weight,
+                gate,
+                routed,
+                out,
+                2,
+                num_warps=1,
+                enable_fp_fusion=False,
+            )
         return out.view(shape)
