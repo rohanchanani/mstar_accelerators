@@ -89,3 +89,7 @@ coverage extends the consumer/constraint solver, using the declaration's facts.
 Backend conformance and compiler unit tests test their own mechanisms; they are
 not alternate acceleration qualification policies. Ad hoc investigative tests
 belong in scratch with explicit evidence scope.
+
+## Current C optimization objective
+
+Through the presentation, optimize C against the unchanged Atindra branch (`678f59d6adb3d892263f2ba30fcf7b28145abf2e`) using its original benchmark. Report final C performance against that baseline, not B. Keep the baseline immutable. Internal C optimization enabled/disabled controls may guide implementation but are not the presentation comparison. Preserve correctness and ownership boundaries. Work efficiently without an arbitrary experiment time cutoff; the separately established VM usage deadline still applies.
