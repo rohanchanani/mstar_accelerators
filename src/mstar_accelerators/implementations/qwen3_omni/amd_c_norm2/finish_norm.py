@@ -7,10 +7,18 @@ from .region_mlp import gateup,down
 @triton.jit
 def finish_residual_norm(P,R,W,Y,S,M:tl.constexpr,EPS:tl.constexpr):
     row=tl.program_id(0)
-    k=tl.arange(0,8)
     n=tl.arange(0,1024)
-    part=tl.load(P+k[:,None]*(M*1024)+row*1024+n[None,:])
-    delta=tl.sum(part,axis=0).to(tl.bfloat16).to(tl.float32)
+    # Match the accepted split-K finish's cross-warp reduction tree before
+    # rounding delta to BF16; changing layout must not change this boundary.
+    p0=tl.load(P+row*1024+n)
+    p1=tl.load(P+M*1024+row*1024+n)
+    p2=tl.load(P+2*M*1024+row*1024+n)
+    p3=tl.load(P+3*M*1024+row*1024+n)
+    p4=tl.load(P+4*M*1024+row*1024+n)
+    p5=tl.load(P+5*M*1024+row*1024+n)
+    p6=tl.load(P+6*M*1024+row*1024+n)
+    p7=tl.load(P+7*M*1024+row*1024+n)
+    delta=(((p0+p4)+(p2+p6))+((p1+p5)+(p3+p7))).to(tl.bfloat16).to(tl.float32)
     residual=tl.load(R+row*1024+n).to(tl.float32)
     summed=(residual+delta).to(tl.bfloat16)
     rounded=summed.to(tl.float32)
