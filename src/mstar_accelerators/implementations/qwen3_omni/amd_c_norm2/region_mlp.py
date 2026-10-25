@@ -3,6 +3,7 @@ import torch
 import triton as tr
 import triton.language as tl
 
+
 @tr.jit
 def gateup(X,W,A,M:tl.constexpr, BN:tl.constexpr,BK:tl.constexpr):
  m=tl.arange(0,16); n=tl.program_id(0)*BN+tl.arange(0,BN); k=tl.arange(0,BK)
@@ -90,6 +91,8 @@ def full_region(x,wg,wd,bi=16,bo=256,warps=4):
  return o
 
 from mstar.model.components.distributed import ParallelGatedMLP
+
+
 class PredictorRegionMLP(ParallelGatedMLP):
     region_enabled=True
 

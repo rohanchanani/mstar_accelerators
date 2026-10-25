@@ -37,9 +37,9 @@ from torch import nn
 from ..amd_a.router_consistency import ConsistentBF16Router, PrefillConsistentMoe
 from .attention import Qwen3OmniAttention
 from .cp_kernels import cp_qk_norm_rope_kv_write
-from .rounded_norm import rounded_add_norm
-from .region_mlp import PredictorRegionMLP
 from .finish_norm import predictor_mlp_next_norm
+from .region_mlp import PredictorRegionMLP
+from .rounded_norm import rounded_add_norm
 from .short_attention import short_decode_attn_nhd
 
 
@@ -534,6 +534,7 @@ class Qwen3OmniCodePredictor(nn.Module):
         # predictor arithmetic uses the loaded parameter dtype.
         flat_pos = position_ids.reshape(-1)
 
+        residual = hidden_states
         fuse_residual_norm = self.model.layers[0].rounded_norm_enabled
         fuse_mlp_finish = (
             self.finish_norm_enabled and fuse_residual_norm and bs * seq_len in (4, 8)

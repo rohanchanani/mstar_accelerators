@@ -2,7 +2,9 @@
 import torch
 import triton
 import triton.language as tl
-from .region_mlp import gateup,down
+
+from .region_mlp import down, gateup
+
 
 @triton.jit
 def finish_residual_norm(P,R,W,Y,S,M:tl.constexpr,EPS:tl.constexpr):
