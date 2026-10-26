@@ -114,9 +114,9 @@ def test_actual_program_and_engine_consumed_for_every_talker_branch(tiny_model, 
     assert session.managers == []
 
 
-def test_production_amd_declaration_is_honest_skip_on_cpu(tiny_model):
+def test_production_amd_talker_declaration_is_honest_skip_on_cpu(tiny_model):
     book = Path(__file__).parents[1] / "accelerations/qwen3_omni/amd"
-    entries = load_accelerations(str(book))
+    entries = load_accelerations(str(book / "Talker.py"))
     session = QualificationSession()
     adapter = TalkerCaseAdapter(tiny_model, session=session, device="cpu",
                                options={"dtype": "bfloat16", "batches": [1, 2, 8]})

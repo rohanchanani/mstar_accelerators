@@ -53,8 +53,8 @@ def check_qualification_report(report):
 
 
 def qualification_options(deployment):
-    if deployment.get("runtime_extension", {}).get("nodes") != ["Talker"]:
-        raise ValueError("the AMD campaign requires the external Talker deployment")
+    if deployment.get("runtime_extension", {}).get("nodes") != ["Thinker", "Talker", "audio_encoder"]:
+        raise ValueError("the AMD campaign requires the external Thinker, Talker and audio-encoder deployment")
     return {"checkpoint": deployment["model_kwargs"]["model_path_hf"],
             "device": "cuda:0", "threads": 4}
 

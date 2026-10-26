@@ -54,14 +54,14 @@ def test_asset_manifest_is_complete_for_the_pinned_checkpoint():
                for row in manifest["files"])
 
 
-def test_rendered_deployment_preserves_policy_and_selects_only_talker(tmp_path):
+def test_rendered_deployment_preserves_policy_and_selects_migrated_nodes(tmp_path):
     tool = load_tool("prepare_assets")
     template = ROOT / "deployments/qwen3_omni_amd.yaml"
     checkpoint = tmp_path / "model with spaces"
     destination = tmp_path / "rendered.yaml"
     source = yaml.safe_load(template.read_text())
     config = tool.render_deployment(template, checkpoint, destination)
-    assert config["runtime_extension"]["nodes"] == ["Talker"]
+    assert config["runtime_extension"]["nodes"] == ["Thinker", "Talker", "audio_encoder"]
     assert config["runtime_extension"]["factory"] == \
         "mstar_accelerators.backends.torch.device_runtime:DeviceTorchRuntime"
     assert Path(config["runtime_extension"]["accelerations"]) == ROOT / "accelerations/qwen3_omni/amd"
@@ -209,7 +209,7 @@ def test_campaign_stage_retains_actual_child_failure_and_stops(tmp_path):
 
 def test_launch_configuration_supplies_environment_not_test_case_policy():
     config = {"model_kwargs": {"model_path_hf": "/checkpoint"},
-              "runtime_extension": {"nodes": ["Talker"]}}
+              "runtime_extension": {"nodes": ["Thinker", "Talker", "audio_encoder"]}}
     assert load_tool("run_foundation").qualification_options(config) == \
         {"checkpoint": "/checkpoint", "device": "cuda:0", "threads": 4}
 
