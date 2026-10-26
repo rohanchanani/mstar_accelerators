@@ -47,7 +47,7 @@ def run(x, w, r, nw):
 def supported(attn, norm, residual):
     from mstar.model.components.distributed.linear import RowParallelLinear
     from mstar.model.components.norm import RMSNorm
-    from mstar.model.qwen3_omni.components.attention import Qwen3OmniAttention
+    from .thinker_attention import Qwen3OmniAttention
 
     if type(attn) is not Qwen3OmniAttention or type(norm) is not RMSNorm or type(attn.o_proj) is not RowParallelLinear:
         return False
