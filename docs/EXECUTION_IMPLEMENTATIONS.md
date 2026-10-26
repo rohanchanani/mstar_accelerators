@@ -113,11 +113,52 @@ outputs and the actual logical invocation. The model's ordinary result mapper
 performs the semantic mapping to graph edges and effects. A runner choice does
 not create another copy of those model semantics.
 
+### Fixed tensor programs
+
+`TensorForwardExecution(build=..., bind_result=None)` supports early construction
+and already-named logical outputs. `build(binding)` replaces `Implementation.prepare`;
+supplying both is an error. It loads and places the independent physical module
+before resource allocation. The runtime then calls its `bind_resources(resources)`
+when resource views exist. Assembly owns early programs until binding transfers
+ownership; either failure path closes them through the ordinary owner.
+
+`bind_result` defaults to the typed binder. Set it to `None` only when the program
+already returns the established named outputs consumed by logical postprocessing.
+The runtime still copies captured storage, slices packed outputs, commits effects,
+and invokes the logical node's filtering and postprocessing. It does not derive
+an output-shape oracle from the output being checked. The central qualification
+consumer continues comparing outputs and state against the model contract.
+
+Assembly can lower a single such TensorForward program into the common tensor
+lifecycle. It requires a finite deployment admission bound, all hosted walks,
+TP1/SP1, the logical node’s `execution_result_is_output_only` promise,
+and a condition that specializes to constant YES for every admitted batch
+size while all request policy, token-length and walk facts remain unspecified.
+UNKNOWN is not proof. Capabilities and registration identity remain attached to
+the node; outside the proved domain the ordinary selection path remains available.
+Primitive executions and alternative/conditional TensorForward programs retain
+their existing consumer. No scheduler grouping or supported domain is narrowed.
+
+A logical contract may expose `input_preparation`, a model-owned protocol for
+physical operations required during interpretation. Thinker requests embedding
+lookup and media sentinel construction at its existing semantic boundaries.
+The physical program's `input_preparation()` creates a row-local session; the
+runtime passes it as `preparation` to the logical node, then retains its
+`finish(logical_row)` result alongside the unchanged logical row. Deferral and
+admission retries retain both. Computation is not installed onto the logical shell.
+
+The fixed program uses the common whole-step autocast, warmup order, graph slots,
+preprocessing, forward, commit and output collection. Authored capture sizes are
+physical geometry, independent of the real-request admission bound. Eager and
+captured execution must still implement the same semantics.
+
 ### Compilation and capture are explicit choices
 
 The ordinary forward compilation policy and the compilation policy used while
 preparing captured regions are separate. `CompilePolicy` exposes enablement,
-mode, full-graph and dynamic-shape choices, and platform overrides. Autocast is
+mode, full-graph and dynamic-shape choices, and platform overrides.
+`fallback_to_eager` handles compile-wrapper construction failure only; it never
+retries a failed lazy forward after effects may have occurred. Autocast is
 also explicit; `autocast_dtype=None` disables ambient autocast for this program.
 
 `CapturePolicy.enabled` requests capture of the program's supplied recipes.
@@ -163,12 +204,7 @@ the generator, assembly/runtime consumer and qualification consumer to change
 together. A handwritten filled book alone cannot demonstrate that the authoring
 surface exposes the new choices.
 
-## AMD A and qualification
-
-The AMD A experiment deliberately reproduces the starting Talker program's
-physical behavior, including its chosen decode capture. That requirement comes
-from the experiment. Sharing a logical reference with another acceleration does
-not impose the other acceleration's physical program or runner choices.
+## AMD implementation and qualification
 
 The AMD deployment selects Talker, Thinker and the audio encoder through
 `mstar_accelerators`. Their physical programs are owned by this repository;

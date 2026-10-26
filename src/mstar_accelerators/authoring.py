@@ -101,6 +101,9 @@ def render_acceleration(node, contract, specs, *, node_name, contexts, device_ty
         f"from {reference.__module__} import {reference.__name__}",
         f"from {contract.result_type.__module__} import {contract.result_type.__name__}",
     }
+    if contract.input_preparation is not None:
+        protocol = contract.input_preparation
+        imports.add(f"from {protocol.__module__} import {protocol.__name__}")
     if execution == "callable":
         imports.update({
             "from mstar.engine.execution import Execution",
@@ -137,6 +140,8 @@ def render_acceleration(node, contract, specs, *, node_name, contexts, device_ty
             "        # Editable physical view and runtime numerical resource choices.",
             "        resources=tensor_resource_requests,",
             "        execution=TensorForwardExecution(",
+            "            # Optional: build(binding) instead of prepare(binding, resources).",
+            "            # Optional: bind_result=None for established named logical outputs.",
             "            compile=CompilePolicy(enabled=False),",
             "            capture=CapturePolicy(",
             "                enabled=False, required=False, compile=CompilePolicy(enabled=False),",

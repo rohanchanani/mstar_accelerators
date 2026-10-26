@@ -9,7 +9,7 @@ from .thinker_program import ThinkerProgram
 from .moe import select_expert_kernels
 
 
-def prepare_thinker(binding, resources):
+def build_thinker(binding):
     config = deepcopy(binding.model.config)
     with torch.device("meta"):
         model = Qwen3OmniThinkerModel(config, comm_group=binding.tp_group)
@@ -26,6 +26,6 @@ def prepare_thinker(binding, resources):
         raise ValueError(f"Uninitialized Thinker parameters: {sorted(missing)}")
     select_expert_kernels(model)
     prepare_moe_weights(model)
-    program = ThinkerProgram(model.eval(), config)
-    program.bind_resources(resources)
+    program = ThinkerProgram(model.eval(), config,
+                             decode_mask=binding.submodule._get_decode_thinker_mask)
     return program.eval()

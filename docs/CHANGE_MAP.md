@@ -2,7 +2,7 @@
 
 The deliverable has two source repositories. The four returned Pi acceleration
 files and three authored CPU TP2 books are present, along with the external
-Qwen3-Omni Talker book. The delivery's receipts, manifests,
+Qwen3-Omni Talker, Thinker and audio-encoder books. The delivery's receipts, manifests,
 patches and Git bundles are evidence and transfer material, not a third runtime
 project. The exact file list is also available in the generated patch inventory.
 
@@ -23,7 +23,7 @@ project. The exact file list is also available in the generated patch inventory.
 - `mstar/worker/engine_manager.py`: opt-in fresh shell construction, static
   assembly, typed resource-request collection and ordinary resource binding. Bound
   programs do not first load/cast a reference compute stack.
-- `mstar/engine/engine.py`: resource-ready program preparation and binding;
+- `mstar/engine/engine.py`: early construction ownership, resource-ready binding and fixed tensor lowering;
   consumes the implementation's execution request. A tensor-forward program
   remains a separate physical object and uses the existing Torch compilation,
   capture, slot and resource lifecycle according to its selected policy.
@@ -45,8 +45,9 @@ project. The exact file list is also available in the generated patch inventory.
 - `mstar/engine/resources/step.py`: retryable `ExecutionBusy` admission outcome.
 - `mstar/engine/accelerator_graph_runner.py`: a disabled-autocast scope actually
   disables ambient autocast; programs own their numerical policy.
-  Native bound runners retain the ceiling replay bucket for their admitted row
-  limit and omit larger unreachable buckets.
+  General selected runners retain the ceiling replay bucket for their admitted
+  row limit. Fixed named-output programs use the common engine lifecycle and
+  preserve their full authored capture geometry independently of admission.
 
 ### 1.3 Logical weights and physical resource consumers
 

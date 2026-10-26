@@ -1,6 +1,7 @@
 # Qwen3-Omni on AMD MI300X
 
-This is the single retained AMD implementation used by the measured service.
+This relocates the AMD implementation used by the measured service into
+acceleration-owned programs.
 It serves the full five-node graph with BF16 execution, TP1/SP1, ordinary
 sampling, and optional captured execution. Eager execution implements the same
 semantics. MStar owns scheduling, request state, allocation and output lifetime;

@@ -9,12 +9,15 @@ import torch
 from mstar.conductor.request_info import CurrentForwardPassInfo
 from mstar.distributed.communication import WorkerParallelGroups
 from mstar.engine.engine import ExecutingBatch
+from mstar.engine.execution import LogicalInvocation
 from mstar.engine.resources.step import StepContext
 from mstar.engine.resources.sampler.config import SamplingReqConfig
 from mstar.model.binding import NodeBinding
+from mstar.model.submodule_base import ModelInputsFromEngine
 from mstar.model.qwen3_omni.config import THINKER_KV, THINKER_POS, THINKER_SAMPLER
 from mstar.worker.engine_manager import EngineManager
 from mstar_accelerators.binding import static_facts
+from mstar_accelerators.compiler import bind_tensor_result
 from mstar_accelerators.registry import Registry
 from mstar_accelerators.testing.harness import CasePlan, Comparison
 
@@ -77,6 +80,10 @@ class NodeCaseAdapter:
         manager.warmup_all()
         engine = manager.engine
         resources = engine._submodules[self.node].resources
+        validate = None
+        if candidate is not None:
+            option = engine.execution_capabilities(self.node).options[0]
+            validate = bind_tensor_result(option.runner.binding)
         saved = {}
         rng = torch.Generator().manual_seed(20261024)
         h = self.model.config.thinker_hidden_size
@@ -125,7 +132,10 @@ class NodeCaseAdapter:
                                        f'skipped: {batch.skipped_rids}')
                 if candidate is not None:
                     engine.reserve_replay_slot(batch)
-                    if batch.selected_execution is None or batch.selected_execution.option.name != candidate[0]:
+                    selected = batch.selected_execution
+                    capabilities = engine.execution_capabilities(self.node)
+                    option = capabilities.fixed_option if selected is None else selected.option
+                    if option is None or option.name != candidate[0]:
                         raise RuntimeError(f'qualification did not select {candidate[0]} '
                             f'for {walk}/batch{batch_size}: {batch.admit_error}')
                 outputs = engine.exec(batch)
@@ -138,6 +148,13 @@ class NodeCaseAdapter:
                     'walk': walk, 'batch': batch_size, 'seconds': time.perf_counter() - start,
                     'captured': batch.step_context.slot_lease is not None,
                     'scope': 'single diagnostic sample including preparation; not a benchmark claim'})
+                if validate is not None:
+                    # Inspect owned production outputs before model postprocessing.
+                    # The validator's reconstruction never replaces the serving result.
+                    validate(outputs, LogicalInvocation(walk, rids, batch.inputs,
+                        ModelInputsFromEngine(request_ids=rids, per_request_info=infos,
+                                              resources=resources),
+                        row_walks=tuple(infos[rid].graph_walk for rid in rids)))
                 for rid in rids:
                     values = outputs.per_rid_outputs.get(rid, {})
                     # Apply the same model semantics before comparing graph-visible fields.

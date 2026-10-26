@@ -34,6 +34,12 @@ class AudioProgram(nn.Module):
         self.audio_encoder = audio_encoder
         self._encoder_takes_return_dict = _accepts_kwarg(audio_encoder.forward, "return_dict")
 
+    def can_batch(self, batch, model_inputs):
+        return False
+
+    def get_accelerator_graph_configs(self, device, tp_world_size=1):
+        return []
+
     def preprocess(self, graph_walk, engine_inputs, inputs):
         if len(inputs) > 1:
             raise NotImplementedError(
@@ -73,8 +79,7 @@ class AudioProgram(nn.Module):
         return {"audio_embeds": [audio_embeds]}
 
 
-def prepare_audio(binding, resources):
-    del resources
+def build_audio(binding):
     # HF configuration describes the logical architecture, not an implementation factory.
     config = AutoConfig.from_pretrained(binding.model.local_dir, trust_remote_code=False).thinker_config.audio_config
     patch_hf_fa2_int_maxlen()

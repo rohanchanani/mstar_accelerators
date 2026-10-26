@@ -25,12 +25,17 @@ class ThinkerProgram(nn.Module):
     PREFILL_VISION_CAPTURE_BATCH_SIZES = [1, 4, 16, 32]
     DEEPSTACK_KEY = "deepstack"
 
-    def __init__(self, model, config):
+    def __init__(self, model, config, *, decode_mask):
         super().__init__()
         self.model, self.config = model, config
-        self._inv_freq = self._decode_thinker_mask = None
+        self._inv_freq = None
+        self._decode_mask = decode_mask
         self._audio_bos_embed = self._audio_eos_embed = None
         self._vision_bos_embed = self._vision_eos_embed = None
+        self._media_sentinels = {}
+
+    def input_preparation(self):
+        return _InputPreparation(self)
 
     def get_device(self):
         return next(self.parameters()).device
@@ -539,16 +544,7 @@ class ThinkerProgram(nn.Module):
 
 
     def _get_decode_thinker_mask(self, device: torch.device) -> torch.Tensor:
-        """Return the constant ``[[0], [1]]`` decode mask (multimodal row =
-        0, text-inclusion row = 1), lazily allocated per device."""
-        if (
-            self._decode_thinker_mask is None
-            or self._decode_thinker_mask.device != device
-        ):
-            self._decode_thinker_mask = torch.tensor(
-                [[0], [1]], dtype=torch.bool, device=device,
-            )
-        return self._decode_thinker_mask
+        return self._decode_mask(device)
 
 
     def filter_batched_output(
@@ -574,3 +570,34 @@ class ThinkerProgram(nn.Module):
         }
 
 
+
+
+class _InputPreparation:
+    """A row-local materialization; retained by the runtime with the logical row."""
+    def __init__(self, program):
+        self.program = program
+        self.embeddings = None
+
+    def embed_tokens(self, token_ids):
+        self.embeddings = self.program.model.model.embed_tokens(token_ids)
+        return self.embeddings
+
+    def wrap_media(self, values, *, start_token_id, end_token_id):
+        key = (start_token_id, end_token_id)
+        sentinels = self.program._media_sentinels.get(key)
+        if sentinels is None:
+            start = torch.tensor([start_token_id], dtype=torch.long, device=values.device)
+            end = torch.tensor([end_token_id], dtype=torch.long, device=values.device)
+            embed = self.program.model.model.embed_tokens
+            sentinels = (embed(start), embed(end))
+            self.program._media_sentinels[key] = sentinels
+        self.embeddings = torch.cat([sentinels[0], values, sentinels[1]], dim=0)
+        return self.embeddings
+
+    def finish(self, logical):
+        from dataclasses import replace
+        if self.embeddings is None:
+            raise RuntimeError("logical preparation did not request an embedding")
+        return replace(logical, input_embeds=self.embeddings,
+            tensor_inputs={key: value for key, value in logical.tensor_inputs.items()
+                           if key != "embedding_kind" and not key.startswith("deepstack_")})

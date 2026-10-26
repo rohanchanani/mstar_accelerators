@@ -7,7 +7,7 @@ from mstar_accelerators.backends.torch.tensor_forward import tensor_resource_req
 from typing import Literal
 from mstar_accelerators import Acceleration, Eq, Implementation, TensorForwardExecution, When
 import torch
-from mstar_accelerators.implementations.qwen3_omni.amd.audio_program import prepare_audio
+from mstar_accelerators.implementations.qwen3_omni.amd.audio_program import build_audio
 
 @dataclass(frozen=True)
 class Inputs:
@@ -39,6 +39,6 @@ acceleration = Acceleration(
     reference=AudioEncoderLogical,
     when=When(Eq("node_name", "audio_encoder"), Eq("device_type", "cuda"), Eq("platform", "rocm"),
               Eq("dtype", torch.bfloat16), Eq("tp_size", 1), Eq("sp_size", 1)),
-    implementation=Implementation(prepare=prepare_audio, resources=tensor_resource_requests,
-        execution=TensorForwardExecution(compile=CompilePolicy(enabled=True, dynamic=None, platform_overrides=True),
+    implementation=Implementation(resources=tensor_resource_requests,
+        execution=TensorForwardExecution(build=build_audio, bind_result=None, compile=CompilePolicy(enabled=True, dynamic=None, platform_overrides=True, fallback_to_eager=True),
                                          autocast_dtype=torch.bfloat16)))

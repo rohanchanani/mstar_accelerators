@@ -10,7 +10,7 @@ from mstar_accelerators.backends.torch.tensor_forward import tensor_resource_req
 from typing import Literal
 from mstar_accelerators import Acceleration, Eq, Implementation, Range, TensorForwardExecution, When
 import torch
-from mstar_accelerators.implementations.qwen3_omni.amd.thinker_preparation import prepare_thinker
+from mstar_accelerators.implementations.qwen3_omni.amd.thinker_preparation import build_thinker
 
 @dataclass(frozen=True)
 class Inputs:
@@ -52,9 +52,9 @@ acceleration = Acceleration(
     reference=ThinkerLogical,
     when=When(Eq("node_name", "Thinker"), Eq("device_type", "cuda"), Eq("platform", "rocm"),
               Eq("dtype", torch.bfloat16), Eq("tp_size", 1), Eq("sp_size", 1), Range("batch_size", 1, 32)),
-    implementation=Implementation(prepare=prepare_thinker, resources=tensor_resource_requests,
-        execution=TensorForwardExecution(
-            compile=CompilePolicy(enabled=True, fullgraph=False, dynamic=None, platform_overrides=True),
+    implementation=Implementation(resources=tensor_resource_requests,
+        execution=TensorForwardExecution(build=build_thinker, bind_result=None,
+            compile=CompilePolicy(enabled=True, fullgraph=False, dynamic=None, platform_overrides=True, fallback_to_eager=True),
             capture=CapturePolicy(enabled=True, required=False,
                 compile=CompilePolicy(enabled=True, mode="max-autotune-no-cudagraphs", fullgraph=False,
                                       dynamic=False, platform_overrides=True)),

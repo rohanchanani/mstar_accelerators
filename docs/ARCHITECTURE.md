@@ -42,9 +42,11 @@ change when a program fuses internal work.
   workspace acquisition.
 
 `Registry.assemble(NodeBinding)` derives `NodeAssembly`. This is a runtime
-product, not another handwritten model specification. M* first collects typed
-physical requests, resolves and builds its ordinary resources, then prepares
-programs and installs `ExecutionCapabilities` on the fresh shell. Program code
+product, not another handwritten model specification. M* collects typed physical requests and constructs early tensor programs when
+requested, resolves and builds its ordinary resources, then binds programs and
+installs `ExecutionCapabilities` on the fresh shell. A provably fixed named-output
+tensor program uses the common tensor lifecycle; conditional programs retain
+per-invocation selection. See `EXECUTION_IMPLEMENTATIONS.md`. Program code
 does not replace methods or install parameters on that logical shell. The
 runtime binds the selected physical program before caching runner callables.
 

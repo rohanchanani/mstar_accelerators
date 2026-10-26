@@ -13,7 +13,7 @@ from mstar_accelerators.definition import PreparedImplementation
 
 
 class Shell:
-    pass
+    execution_result_is_output_only = True
 
 
 def binding(**changes):
@@ -231,3 +231,66 @@ def test_mixed_row_walks_remain_an_authored_invocation_choice():
         assert not capabilities.possibilities(replace(facts, row_walks=("prefill", "unhosted")))
     finally:
         capabilities.close()
+
+@pytest.mark.parametrize('condition,fixed', [
+    (Range('batch_size', 1, 8), True),
+    (When(Range('batch_size', 1, 8), Range('total_tokens', 1, 16)), False),
+    (Eq('graph_walk', 'prefill'), False),
+])
+@pytest.mark.parametrize("output_only", [False, True])
+def test_fixed_tensor_binding_requires_positive_coverage(monkeypatch, condition, fixed, output_only):
+    monkeypatch.setattr(Shell, "execution_result_is_output_only", output_only)
+    from mstar_accelerators import TensorForwardExecution
+    events = []
+
+    class Program(torch.nn.Module):
+        def close(self):
+            events.append('close')
+
+    def build(local):
+        events.append('build')
+        return Program()
+
+    entry = Acceleration(Shell, condition,
+        Implementation(execution=TensorForwardExecution(build=build, bind_result=None)))
+    assembly = Registry({'tensor': entry}).assemble(
+        binding(graph_walks=('prefill',), model_config={'max_concurrent_requests': 4}))
+    assert events == ['build']
+    caps = assembly.bind({})
+    assert (caps.fixed_option is not None) is (fixed and output_only)
+    assembly.close()  # ownership has transferred to capabilities
+    assert events == ['build']
+    caps.close()
+    assert events == ['build', 'close']
+
+
+def test_early_program_is_closed_when_assembly_is_abandoned():
+    from mstar_accelerators import TensorForwardExecution
+    events = []
+
+    class Program(torch.nn.Module):
+        def close(self):
+            events.append('close')
+
+    entry = Acceleration(Shell, Range('batch_size', 1, 8),
+        Implementation(execution=TensorForwardExecution(build=lambda _: Program(), bind_result=None)))
+    assembly = Registry({'tensor': entry}).assemble(
+        binding(model_config={'max_concurrent_requests': 4}))
+    assembly.close()
+    assembly.close()
+    assert events == ['close']
+
+
+def test_late_row_adapter_keeps_general_execution_consumer():
+    from mstar_accelerators import TensorForwardExecution
+
+    class Program(torch.nn.Module):
+        def prepare_rows(self, rows):
+            return rows
+
+    entry = Acceleration(Shell, Range("batch_size", 1, 8),
+        Implementation(execution=TensorForwardExecution(build=lambda _: Program(), bind_result=None)))
+    caps = Registry({"tensor": entry}).assemble(
+        binding(model_config={"max_concurrent_requests": 4})).bind({})
+    assert caps.fixed_option is None
+    caps.close()
