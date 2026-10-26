@@ -1,4 +1,4 @@
-"""A's physical checkpoint packing and module preparation.
+"""Physical checkpoint packing and module preparation.
 
 The logical model supplies named checkpoint values. This implementation chooses
 fused QKV/expert layouts, Triton MoE, predictor-head stacking and device dtype.

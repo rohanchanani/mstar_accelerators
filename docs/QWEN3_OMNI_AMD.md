@@ -5,8 +5,7 @@ It serves the full five-node graph with BF16 execution, TP1/SP1, ordinary
 sampling, and optional captured execution. Eager execution implements the same
 semantics. MStar owns scheduling, request state, allocation and output lifetime;
 the Talker, Thinker and audio-encoder accelerations own their physical programs
-and weight preparation. The audio encoder retains FP32 weights with BF16
-autocast, matching the measured service.
+and weight preparation. The audio encoder uses BF16 parameters and buffers with BF16 autocast.
 
 ## Install and prepare
 

@@ -177,6 +177,80 @@ def pack_tensor_result(result, contract, request_ids=None):
 
 
 def bind_tensor_result(binding):
+    """Specialize result binding once; fixed contracts keep their original path."""
+    contract = binding.submodule.logical_contract()
+    row_contract = contract.dimensions is not None or any(
+        spec.present_when is not None or isinstance(spec.dtype, tuple)
+        or any(isinstance(dim, str) and dim != "batch" for dim in spec.shape)
+        for spec in contract.outputs
+    )
+    return (_bind_row_tensor_result(binding) if row_contract
+            else _bind_static_tensor_result(binding))
+
+
+def _bind_static_tensor_result(binding):
+    """Compile physical output organization back to the logical result record."""
+    from mstar.engine.execution import ExecutionResult
+    from mstar.model.submodule_base import BatchedModelOutput
+
+    contract = binding.submodule.logical_contract()
+
+    def result(raw, invocation):
+        if isinstance(raw, ExecutionResult):
+            return raw
+        if isinstance(raw, contract.result_type):
+            return raw
+        raw = BatchedModelOutput.coerce(raw)
+        if (not raw.row_outputs and not raw.packed_outputs
+                and not any(raw.per_rid_outputs.values())):
+            # Some state-only walks produce no logical outputs. The model's
+            # mapper knows that walk and does not manufacture unused tensors.
+            return None
+        values = {}
+        count = len(invocation.request_ids)
+        for spec in contract.outputs:
+            if raw.row_outputs is not None and spec.name in raw.row_outputs:
+                value = raw.row_outputs[spec.name]
+                if spec.per_request:
+                    value = tuple(value[index] for index in range(count))
+            elif spec.name in raw.packed_outputs:
+                value = raw.packed_outputs[spec.name]
+            else:
+                rows = []
+                for rid in invocation.request_ids:
+                    value = raw.per_rid_outputs[rid][spec.name]
+                    if isinstance(value, (list, tuple)):
+                        if len(value) != 1:
+                            raise ValueError(f"{spec.name}: expected one tensor per row")
+                        value = value[0]
+                    rows.append(value)
+                if spec.per_request:
+                    value = tuple(rows)
+                elif spec.shape and spec.shape[0] == "batch":
+                    tail = tuple(spec.shape[1:])
+                    value = (torch.stack(rows) if tuple(rows[0].shape) == tail
+                             else torch.cat(rows, dim=0))
+                elif len(rows) == 1:
+                    value = rows[0]
+                else:
+                    raise ValueError(f"{spec.name}: a whole-invocation output needs packed storage")
+            expected = _shape(spec.shape, tokens=None, batch=count)
+            tensors = value if spec.per_request else (value,)
+            if spec.per_request and len(tensors) != count:
+                raise ValueError(f"{spec.name}: expected {count} result rows")
+            for tensor in tensors:
+                if not isinstance(tensor, torch.Tensor) or tuple(tensor.shape) != expected:
+                    raise ValueError(f"{spec.name}: expected logical output shape {expected}")
+                dtype = spec.dtype or binding.dtype
+                if tensor.dtype != dtype:
+                    raise ValueError(f"{spec.name}: expected logical output dtype {dtype}, got {tensor.dtype}")
+            values[spec.name] = value
+        return contract.result_type(**values)
+
+    return result
+
+
+def _bind_row_tensor_result(binding):
     """Compile physical output organization back to the logical result record."""
     from mstar.engine.execution import ExecutionResult
     from mstar.model.submodule_base import BatchedModelOutput

@@ -17,7 +17,7 @@ def prepare_thinker(binding, resources):
     source = binding.model.logical_weights()
     values = source.load(name for name in source.by_name if name.startswith(("thinker.model.", "thinker.lm_head.")))
     loaded = load_hf_weights(model,
-        ((name.removeprefix("thinker."), value.to(binding.device, dtype=binding.dtype))
+        ((name.removeprefix("thinker."), value.to(binding.device))
          for name, value in values.items()),
         stacked_params=stacked_parameter_rules(config.thinker_text.num_experts),
         name_remapper=remap_checkpoint_name)
