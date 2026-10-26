@@ -21,6 +21,8 @@ from mstar_accelerators.compiler import bind_tensor_result
 from mstar_accelerators.registry import Registry
 from mstar_accelerators.testing.harness import CasePlan, Comparison
 from ..policy import QWEN_BATCHES
+from ..generation import HiddenStates, GreedyOutput
+from ..observations import SamplerObservation
 
 
 class NodeCaseAdapter:
@@ -40,7 +42,9 @@ class NodeCaseAdapter:
         batches = QWEN_BATCHES if self.node == 'Thinker' else (1,)
         details = {'finite_domain_only': True, 'timings': [],
                    'reference': 'retained MStar model reference through the ordinary engine',
-                   'cases': 'fixed seeded text, media and mixed walks; logical result/state comparison'}
+                   'cases': 'fixed seeded text, media and mixed walks; logical result/state comparison',
+                   'numerics': 'same BF16 reference; reciprocal top-5 generation and per-token hidden cosine/norm',
+                   'observations': 'sampler input/output clones; instrumented correctness runs, not performance evidence'}
         cache = None
 
         def execute(witness):
@@ -56,8 +60,33 @@ class NodeCaseAdapter:
                     cache[walk].append(Comparison(label + '/fields', tuple(sorted(observed)),
                                                   tuple(sorted(expected)), exact=True))
                     for field, wanted in expected.items():
+                        if field in ('sampled_logits', 'sampled_token'):
+                            continue  # Checked with the graph-visible token below.
                         got = observed.get(field)
-                        cache[walk].append(Comparison(label + '/' + field, got, wanted,
+                        if field == 'text_inputs':
+                            # Logical postprocess aliases the emitted token for
+                            # the next graph edge. Check that edge against its
+                            # own source, not another implementation's near-tie.
+                            cache[walk].extend((
+                                Comparison(label + '/text_inputs_alias', got,
+                                           observed['new_token'], exact=True),
+                                Comparison(label + '/reference_text_inputs_alias', wanted,
+                                           expected['new_token'], exact=True),
+                            ))
+                            continue
+                        if field == 'new_token':
+                            cache[walk].extend((
+                                Comparison(label + '/token_collection', got.to(torch.long),
+                                           observed['sampled_token'].reshape(got.shape).to(torch.long), exact=True),
+                                Comparison(label + '/reference_token_collection', wanted.to(torch.long),
+                                           expected['sampled_token'].reshape(wanted.shape).to(torch.long), exact=True),
+                                Comparison(label + '/generation',
+                                           GreedyOutput(observed['sampled_logits'], int(got)),
+                                           GreedyOutput(expected['sampled_logits'], int(wanted))),
+                            ))
+                            continue
+                        cache[walk].append(Comparison(label + '/' + field, got,
+                            HiddenStates(wanted) if field == 'thinker_states' else wanted,
                             exact=not isinstance(wanted, torch.Tensor) or not wanted.is_floating_point(),
                             dtype=wanted.dtype if isinstance(wanted, torch.Tensor) else None))
             # A declaration may accept every walk without an explicit Or. Its
@@ -78,9 +107,10 @@ class NodeCaseAdapter:
         manager.load({self.node}, self.device, config, WorkerParallelGroups(1, 0), None,
                      self.model, None, runtime_extension=None if registry is None else
                      SimpleNamespace(assemble=registry.assemble))
-        manager.warmup_all()
         engine = manager.engine
         resources = engine._submodules[self.node].resources
+        observation = SamplerObservation(resources[THINKER_SAMPLER]) if self.node == 'Thinker' else None
+        manager.warmup_all()
         validate = None
         if candidate is not None:
             option = engine.execution_capabilities(self.node).options[0]
@@ -156,18 +186,26 @@ class NodeCaseAdapter:
                         ModelInputsFromEngine(request_ids=rids, per_request_info=infos,
                                               resources=resources),
                         row_walks=tuple(infos[rid].graph_walk for rid in rids)))
-                for rid in rids:
+                samples = observation.read(batch.step_context.slot_lease) if observation is not None else []
+                for row, rid in enumerate(rids):
                     values = outputs.per_rid_outputs.get(rid, {})
                     # Apply the same model semantics before comparing graph-visible fields.
                     shell = engine._submodules[self.node].submodule
                     shell.postprocess(rid, infos[rid], values)
                     result = {field: value[0].detach().cpu().clone() for field, value in values.items() if value}
+                    if 'new_token' in result:
+                        if len(samples) != 1 or samples[0][0].shape[0] < len(rids):
+                            raise RuntimeError('missing batched Thinker sampler observations')
+                        result['sampled_logits'] = samples[0][0][row]
+                        result['sampled_token'] = samples[0][1][row]
                     if self.node == 'Thinker':
                         result['kv_length'] = resources[THINKER_KV]._streams[rid]['main'].stored_len
                         result['position'] = resources[THINKER_POS]._counters[rid]['main']
                     saved[walk, f'b{batch_size}/r{rid}'] = result
             for rid in rids:
                 manager.remove_request(rid)
+        if observation is not None:
+            observation.close()
         manager.shutdown()
         self.session.managers.remove(manager)
         self.model._submodule_cache.clear()

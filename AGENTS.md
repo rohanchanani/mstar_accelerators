@@ -25,8 +25,13 @@ authorized the centralized registry harness and delegated numerical policy;
 this delivery defines component-rms-v1. This supersedes the historical requirement
 to keep the first Whisper pointwise comparator as the acceptance rule; keep its
 old FAIL receipts and named diagnostic intact. Do not silently tune per-fixture
-thresholds or reinterpret old evidence. Exact token/state/lifetime assertions
-and the backend's original transfer/linear/graph conformance gates are unchanged.
+thresholds or reinterpret old evidence. Exact state/lifetime assertions and the backend's original
+transfer/linear/graph conformance gates are unchanged. Qwen's centralized
+`registry-differential-v2` gate uses matched-precision references and reciprocal
+top-five generation choices, with exact own-sampler argmax, token collection and
+state accounting. Do not restore cross-precision exact generated-token identity
+or treat internal KV numerical diagnostics as whole-node acceptance. See
+`docs/QUALIFICATION.md` for the separately justified policy and its limitations.
 Missing executable references or unavailable target environments are diagnosed
 SKIP, never manufactured PASS. Actual bugs and execution failures are not
 reclassified as reference unavailability. Serving consumes no test verdict.

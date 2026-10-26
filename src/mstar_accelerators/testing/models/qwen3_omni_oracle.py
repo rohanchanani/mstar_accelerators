@@ -41,10 +41,10 @@ class _Request:
 class TalkerOracle:
     """One independent semantic state per request handle.
 
-    ``step`` accepts one already interpreted logical NodeInputs. Greedy output
-    is the primary comparison. Optional ``teacher_codes`` supplies a fixed
-    depth history for numerical diagnosis if candidate sampling diverges; it
-    must not turn a greedy mismatch into a passing qualification result.
+    ``step`` accepts one already interpreted logical NodeInputs. Optional
+    ``teacher_codes`` supplies a shared depth history. Qualification
+    must score each supplied code against the corresponding reference logits;
+    supplying history alone does not constitute a passing comparison.
     """
 
     def __init__(self, model, *, dtype: torch.dtype = torch.float32):
@@ -52,6 +52,7 @@ class TalkerOracle:
             raise ValueError("The portable oracle supports CPU float32 or float64")
         self.config = model.config
         self.dtype = dtype
+        self.device = torch.device("cpu")
         source = model.logical_weights()
         self.weights = source.load(name for name in source.by_name if name.startswith("talker."))
         # Replace one entry at a time so the source dictionary does not retain
@@ -138,10 +139,10 @@ class TalkerOracle:
         return self._norm(x, prefix + ".norm", cfg.rms_norm_eps)
 
     def _materialize(self, walk, inputs):
-        raw = inputs.tensor_inputs["thinker_states"].detach().to(device="cpu", dtype=self.dtype)
+        raw = inputs.tensor_inputs["thinker_states"].detach().to(device=self.device, dtype=self.dtype)
         if walk == "talker_prefill":
-            mask = inputs.tensor_inputs["multimodal_mask"].detach().to(device="cpu", dtype=torch.bool)
-            hidden = torch.empty((raw.shape[0], self.config.talker_hidden_size), dtype=self.dtype)
+            mask = inputs.tensor_inputs["multimodal_mask"].detach().to(device=self.device, dtype=torch.bool)
+            hidden = torch.empty((raw.shape[0], self.config.talker_hidden_size), dtype=self.dtype, device=self.device)
             for selected, kind in ((~mask, "text"), (mask, "hidden")):
                 if selected.any():
                     hidden[selected] = self._project(raw[selected], kind)
@@ -151,9 +152,9 @@ class TalkerOracle:
                 raise ValueError("The logical assistant prefix has six rows")
             text = torch.cat((self._project(raw[:1], "text").expand(4, -1),
                               self._project(raw[4:5], "text"), self._project(raw[5:], "text")))
-            ids = inputs.tensor_inputs["codec_ids"].detach().cpu()
+            ids = inputs.tensor_inputs["codec_ids"].detach().to(self.device)
             return F.embedding(ids, self.weights["talker.model.codec_embedding.weight"]) + text
-        return inputs.input_embeds.detach().to(device="cpu", dtype=self.dtype) + self._project(raw, "text")
+        return inputs.input_embeds.detach().to(device=self.device, dtype=self.dtype) + self._project(raw, "text")
 
     @torch.no_grad()
     def step(self, walk, request_id, inputs, *, repetition_penalty=1.0, teacher_codes=None) -> OracleStep:
@@ -171,18 +172,20 @@ class TalkerOracle:
                               (state.talker_draws, state.predictor_draws), frozenset(state.seen))
 
         logits = self._linear(hidden[-1:], "talker.codec_head")[0]
+        if logits.dtype in (torch.float16, torch.bfloat16):
+            logits = logits.float()
         eos = self.config.talker.codec_eos_token_id
-        suppressed = torch.arange(max(0, cfg.vocab_size - 1024), cfg.vocab_size)
+        suppressed = torch.arange(max(0, cfg.vocab_size - 1024), cfg.vocab_size, device=self.device)
         logits[suppressed[suppressed != eos]] = float("-inf")
         if state.seen and repetition_penalty != 1.0:
-            seen = torch.tensor(sorted(state.seen))
+            seen = torch.tensor(sorted(state.seen), device=self.device)
             values = logits[seen]
             logits[seen] = torch.where(values > 0, values / repetition_penalty, values * repetition_penalty)
         groups = self.config.num_code_groups
-        teacher = None if teacher_codes is None else torch.as_tensor(teacher_codes, dtype=torch.long, device="cpu").reshape(-1)
+        teacher = None if teacher_codes is None else torch.as_tensor(teacher_codes, dtype=torch.long, device=self.device).reshape(-1)
         if teacher is not None and teacher.numel() != groups:
             raise ValueError(f"teacher_codes must have {groups} entries")
-        codes = torch.empty(groups, dtype=torch.long)
+        codes = torch.empty(groups, dtype=torch.long, device=self.device)
         codes[0] = logits.argmax() if teacher is None else teacher[0]
         embedding = F.embedding(codes[:1], self.weights["talker.model.codec_embedding.weight"])
         accumulator = embedding.float().clone()

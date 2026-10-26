@@ -162,6 +162,11 @@ def differential_comparator(acceleration, observation) -> dict:
     del acceleration
     from .sampling import CategoricalDistribution, CategoricalSupport, compare_categorical
 
+    from .generation import GreedyOutput, HiddenStates, compare_greedy, compare_hidden
+    if isinstance(observation.expected, GreedyOutput):
+        return compare_greedy(observation.name, observation.actual, observation.expected)
+    if isinstance(observation.expected, HiddenStates):
+        return compare_hidden(observation.name, observation.actual, observation.expected)
     if isinstance(observation.expected, (CategoricalSupport, CategoricalDistribution)):
         return compare_categorical(observation.name, observation.actual, observation.expected)
     return compare(observation.name, observation.actual, observation.expected,

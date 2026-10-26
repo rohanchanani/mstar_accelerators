@@ -10,7 +10,7 @@ from .numerics import DEFAULT, differential_comparator
 # Existing Qwen default domain; these are not environment/user overrides.
 QWEN_BATCHES = (1, 2, 8)
 QWEN_DECODE_STEPS = 3
-POLICY_ID = "registry-differential-v1"
+POLICY_ID = "registry-differential-v2"
 
 
 def consumer(model, *, session, device, options, corpus=None, features=None,
@@ -35,6 +35,11 @@ def consumer(model, *, session, device, options, corpus=None, features=None,
 
 def identity():
     return {"id": POLICY_ID, "numerics": DEFAULT.name,
+            "generation": "generation-reciprocal-top5-v1",
+            "conditioning": "hidden-cosine-norm-v1",
+            "qwen_reference": {"Talker": "stock HF, matched precision/device and token history",
+                               "Thinker": "retained MStar BF16 through the engine",
+                               "audio_encoder": "retained HF through the engine"},
             "case_selection": "declared-alternatives-v1",
             "qwen_batches": list(QWEN_BATCHES), "qwen_decode_steps": QWEN_DECODE_STEPS,
             "placement_tp_sizes": list(TP_SIZES), "placement_sp_sizes": [1]}

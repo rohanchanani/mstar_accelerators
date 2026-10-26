@@ -1,6 +1,6 @@
 """Bounded Qwen Talker trajectories through the actual registered engine runner.
 
-This optional correctness consumer owns its short synthetic inputs and CPU
+This optional correctness consumer owns its short synthetic inputs and same-precision HF
 oracle. It neither changes serving support nor replaces submitted computation.
 The engine owns every actual request, KV allocation, sampler and graph replay.
 """
@@ -25,7 +25,10 @@ from mstar.worker.engine_manager import EngineManager
 from mstar_accelerators.binding import invocation_facts, static_facts
 from mstar_accelerators.registry import Registry
 from mstar_accelerators.testing.harness import CasePlan, Comparison, Unavailable
-from .qwen3_omni_oracle import TalkerOracle
+from .qwen3_omni_hf import HuggingFaceTalkerOracle
+from ..generation import GreedyOutput
+from ..observations import SamplerObservation
+from ..numerics import compare
 from ..policy import QWEN_BATCHES, QWEN_DECODE_STEPS
 
 WALKS = ('talker_prefill', 'talker_last_prefill', 'talker_decode')
@@ -102,18 +105,19 @@ class TalkerCaseAdapter:
         traces = []
         details = {
             'preparation': 'exact registered implementation.prepare, ordinary EngineManager and selected.run',
-            'case_policy': 'short-greedy-trajectories-v1',
+            'case_policy': 'shared-history-generation-v2',
             'batch_domain': list(self.batches), 'decode_steps': self.decode_steps,
-            'sampling': 'greedy; layer-0 repetition penalty 1.1; exact codes and draw accounting',
+            'sampling': 'greedy; repetition penalty 1.1; reciprocal top-5 reference choices; exact own argmax and draw accounting',
             'finite_domain_only': True, 'trajectories': traces,
             'capture_policy': 'exercise requested decode recipes within their declared batch cap',
-            'reference_storage': 'named logical weights on CPU FP32; no serving model implementation',
+            'reference_storage': f'stock HF on {self.device} at {self.dtype}; shared candidate history',
+            'intermediate_kv_policy': 'numerical differences are diagnostics; shape, dtype, finiteness, retained prefix and lifecycle are gates',
         }
         domains = {'graph_walk': WALKS, 'batch_size': self.batches}
         # Static nonmatches remain a solver SKIP without reading weights.
         if acceleration.when.evaluate(static) is Support.NO:
             return CasePlan(static, domains, lambda witness: (),
-                            'independent eager CPU logical Talker', 'not executed', details)
+                            'stock HF same-precision Talker', 'not executed', details)
         if acceleration.reference is not TalkerSubmodule:
             raise Unavailable('reference_adapter', 'the Talker adapter handles the logical Talker only')
         policies = {key: (sampling_policy_facts(value),) for key, value in _policy(10).items()}
@@ -128,12 +132,12 @@ class TalkerCaseAdapter:
             nonlocal cache
             if cache is None:
                 if self.oracle is None:
-                    self.oracle = TalkerOracle(self.model)
+                    self.oracle = HuggingFaceTalkerOracle(self.model, device=self.device, dtype=self.dtype)
                 cache = self._execute(name, acceleration, static, traces)
             return cache[witness['graph_walk']]
 
         return CasePlan(static, domains, execute,
-                        'independent eager CPU FP32 Talker and dense per-request KV',
+                        'stock HF same-precision Talker and dense per-request KV',
                         f'actual registered program through EngineManager on {self.device}', details)
 
     @torch.no_grad()
@@ -147,9 +151,11 @@ class TalkerCaseAdapter:
         engine = manager.engine
         if self.prepare_engine is not None:
             self.prepare_engine(engine)
-        manager.warmup_all()
         management = engine._submodules['Talker']
         resources, shell = management.resources, management.submodule
+        observations = {key: SamplerObservation(resources[key])
+                        for key in (TALKER_SAMPLER, CODE_PRED_SAMPLER)}
+        manager.warmup_all()
         checks = defaultdict(list)
         rng = torch.Generator().manual_seed(20261024)
         initial_free = resources[TALKER_KV]._arena.allocator.num_free
@@ -170,7 +176,7 @@ class TalkerCaseAdapter:
             for rid in rids:
                 self.oracle.reset(rid)
                 manager.add_request(rid, _policy(rid))
-            previous, retained = {}, []
+            previous, retained, previous_kv = {}, [], {}
             active = list(rids)
 
             def run(walk, raw, label):
@@ -184,8 +190,6 @@ class TalkerCaseAdapter:
                     engine.resource_facts('Talker', active), row_walks=(walk,) * len(active)))}
                 if acceleration.when.evaluate(actual_facts) is not Support.YES:
                     raise ValueError(f'{name}: qualification trajectory {label} is outside authored when')
-                expected = [self.oracle.step(walk, rid, row, repetition_penalty=1.1)
-                            for rid, row in zip(active, batch.inputs, strict=True)]
                 # Pin through the same public selection/geometry entry point
                 # used by serving; retain the actual identity before exec releases
                 # the selection. Never infer execution identity from the test input.
@@ -219,8 +223,22 @@ class TalkerCaseAdapter:
                                              identity, exact=True))
                 if capture_expected:
                     target.append(Comparison(prefix + '/captured_decode', captured, True, exact=True))
+                samples = {key: observer.read(lease) for key, observer in observations.items()}
+                sampling = walk != 'talker_prefill'
+                if sampling:
+                    target.extend((
+                        Comparison(prefix + '/talker_sample_calls', len(samples[TALKER_SAMPLER]), 1, exact=True),
+                        Comparison(prefix + '/predictor_sample_calls', len(samples[CODE_PRED_SAMPLER]),
+                                   self.model.config.num_code_groups - 1, exact=True),
+                    ))
+                    if len(samples[TALKER_SAMPLER]) != 1 or len(samples[CODE_PRED_SAMPLER]) != self.model.config.num_code_groups - 1:
+                        raise RuntimeError('sampler observations missing from the executed path')
                 for row, rid in enumerate(active):
-                    ref = expected[row]
+                    values = output.per_rid_outputs.get(rid, {})
+                    codec = values['codec_tokens'][0].detach().cpu().clone() if sampling else None
+                    prior_seen = set(self.oracle.requests[rid].seen) if rid in self.oracle.requests else set()
+                    ref = self.oracle.step(walk, rid, batch.inputs[row], repetition_penalty=1.1,
+                                           teacher_codes=codec)
                     stem = prefix + f'/request{rid}'
                     kv = resources[TALKER_KV]
                     state = kv._streams[rid]['main']
@@ -235,23 +253,46 @@ class TalkerCaseAdapter:
                     ))
                     positions = torch.arange(ref.kv_length, device=self.device)
                     pages = torch.tensor(state.page_indices, device=self.device)[positions // kv.config.page_size]
-                    for layer, (keys, values) in enumerate(self.oracle.kv(rid)):
+                    for layer, (keys, cache_values) in enumerate(self.oracle.kv(rid)):
                         cache = kv.layer_view(layer)
-                        for component, index, wanted in (('k', 0, keys), ('v', 1, values)):
+                        for component, index, wanted in (('k', 0, keys), ('v', 1, cache_values)):
                             observed = cache[pages, index, positions % kv.config.page_size].detach().cpu().clone()
-                            target.append(Comparison(stem + f'/layer{layer}/{component}', observed,
-                                                     wanted.clone(), dtype=self.dtype))
+                            key = (rid, layer, component)
+                            label = stem + f'/layer{layer}/{component}'
+                            target.append(Comparison(label, (tuple(observed.shape), observed.dtype,
+                                                               bool(observed.isfinite().all())),
+                                                     (tuple(wanted.shape), self.dtype, True), exact=True))
+                            if key in previous_kv:
+                                old = previous_kv[key]
+                                target.append(Comparison(label + '/retained_prefix',
+                                                         observed[:old.shape[0]], old, exact=True))
+                            previous_kv[key] = observed
+                            # A MoE routing near-tie changes later internal KV values.
+                            # Keep this evidence without treating CPU/GPU trajectory
+                            # identity as the semantic contract of the whole node.
+                            record.setdefault('kv_numerical_diagnostics', []).append(
+                                compare(label, observed, wanted.cpu(), dtype=self.dtype))
                     if ref.result is None:
                         continue
-                    values = output.per_rid_outputs[rid]
-                    codec = values['codec_tokens'][0].detach().cpu().clone()
                     embeds = values['talker_input_embeds'][0].detach().cpu().clone()
                     token = values['new_token'][0].detach().cpu().clone()
+                    observed_samples = samples[TALKER_SAMPLER] + samples[CODE_PRED_SAMPLER]
+                    sampled_codes = torch.tensor([int(tokens[row]) for _, tokens in observed_samples], dtype=torch.long)
                     target.extend((
-                        Comparison(stem + '/codec_tokens', codec, ref.result.codec_tokens[0], exact=True),
-                        Comparison(stem + '/token', token, ref.result.tokens[0], exact=True),
-                        Comparison(stem + '/codec_sum', embeds, ref.result.codec_embeds, dtype=torch.float32),
+                        Comparison(stem + '/codec_tokens', codec, sampled_codes, exact=True),
+                        Comparison(stem + '/token', token, sampled_codes[0], exact=True),
+                        Comparison(stem + '/codec_sum', embeds, ref.result.codec_embeds.cpu(), dtype=torch.float32),
                     ))
+                    for group, ((logits, tokens), wanted) in enumerate(zip(
+                            observed_samples, (ref.talker_logits,) + ref.predictor_logits, strict=True)):
+                        actual_logits = logits[row].float().clone()
+                        if group == 0 and prior_seen:
+                            ids = torch.tensor(sorted(prior_seen), dtype=torch.long)
+                            v = actual_logits[ids]
+                            actual_logits[ids] = torch.where(v > 0, v / 1.1, v * 1.1)
+                        target.append(Comparison(stem + f'/group{group}/generation',
+                            GreedyOutput(actual_logits, int(tokens[row])),
+                            GreedyOutput(wanted.cpu(), int(wanted.argmax()))))
                     mask = resources[TALKER_SAMPLER]._sampler.get_token_mask(rid)._seen_token_mask
                     seen = tuple(mask.nonzero().flatten().detach().cpu().tolist())
                     target.append(Comparison(stem + '/seen_tokens', seen, tuple(sorted(ref.seen_tokens)), exact=True))
@@ -305,6 +346,8 @@ class TalkerCaseAdapter:
                 Comparison(f'batch{batch_size}/logical_conditioning_released',
                            bool(set(rids) & shell._eos_embed_sent), False, exact=True),
             ))
+        for observer in observations.values():
+            observer.close()
         return checks
 
 

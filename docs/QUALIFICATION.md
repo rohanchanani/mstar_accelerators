@@ -83,6 +83,7 @@ hardware environment a failing test suite.
 | `testing/harness.py` | Registry consumption, result aggregation, reference/case resolution |
 | `testing/solve.py` | Test-time consumer of the current predicate language |
 | `testing/numerics.py` | Centralized numerical and exact-value policy |
+| `testing/generation.py`, `testing/observations.py` | Central generation/conditioning policy and read-only runtime sampler observations |
 | `testing/sampling.py` | Bounded categorical support, distribution and seed-set policy, independent of RNG algorithm |
 | `testing/models/whisper.py` | Constructible Whisper cases, independent executable reference and state interpretation |
 | `testing/corpus.py`, `testing/corpus_data/` | Platform-owned pinned model/configuration/fixture identities |
@@ -206,6 +207,66 @@ channels affect the scale, padding affects RMS, and global statistics do not
 describe every important subregion. Model-aware exact sink/state checks remain
 necessary. A future consumer may compare meaningful slices or enforce a task
 metric. There is no claim of transitivity or proof of correctness.
+
+### Qwen inference outputs: registry-differential-v2
+
+The previous Qwen rule compared BF16 GPU execution with an independently
+sampled CPU FP32 Talker trajectory, required identical codec IDs and applied a
+component RMS budget to every intermediate KV array. That rule also rejected
+stock Hugging Face (26/40 BF16 KV arrays and 8/40 FP32 arrays on the original
+prefill control). Those failures are preserved; they do not establish candidate
+correctness. This is a justified change to the central oracle and acceptance
+claim, not a kernel repair or a retroactive PASS for the earlier report.
+
+The updated gate follows the inference-output approach in
+[vLLM's model test utilities](https://github.com/vllm-project/vllm/blob/main/tests/models/utils.py)
+and [PyTorch's numerical accuracy guidance](https://docs.pytorch.org/docs/2.9/notes/numerical_accuracy.html):
+
+- Talker uses stock Transformers backbones at the declared precision and device,
+  with the same pinned logical weights. The harness interprets M*'s logical
+  conditioning and history; it imports no candidate kernels into the reference.
+  Thinker retains the ordinary M* reference at the same BF16 precision.
+- `generation-reciprocal-top5-v1` observes the actual runtime sampler's input and
+  returned token. Each token must be an argmax of its own logits after the
+  centrally interpreted repetition penalty. Suppressed positions must match.
+  If the reference and candidate choose different tokens, each choice must be
+  among the other's five highest logits, following vLLM's reciprocal top-N rule.
+  Log probabilities and reference regret are reported. This is a rank-based
+  generation gate, not a bound on the whole probability distribution.
+- The reference scores the **same actual token prefix**, including earlier codec
+  groups, rather than allowing two trajectories to diverge and then comparing
+  unrelated states. Every supplied token is still scored; teacher forcing does
+  not make a wrong output pass by construction. Codec embeddings must equal
+  the FP32 accumulation of the chosen codes' checkpoint embeddings under the
+  existing FP32 numerical policy.
+- `hidden-cosine-norm-v1` checks every graph-visible conditioning row: cosine
+  similarity at least 0.999 (vLLM's default embedding threshold), and vector
+  norms close with BF16 `torch.testing.assert_close` defaults, rtol 0.016 and
+  atol 1e-5. The added norm check rejects scaling that cosine alone cannot see.
+  It is a platform-owned policy for conditioning, not an unchanged vLLM test.
+- KV lengths, positions, draw counts, sampled-token collection, seen-token
+  history, retained cache prefixes, row lifetime and release remain exact.
+  Seen-token history follows what execution actually emitted. KV numerical
+  differences remain in `kv_numerical_diagnostics`; they are not whole-node
+  acceptance requirements. Shape, dtype, finiteness and previously stored
+  prefix preservation remain required. Current and later output decisions
+  exercise the newly written KV state.
+
+These rules replace numerical/token comparisons in the existing centralized
+Qwen adapter; they do not add a second accelerator qualification suite. Audio
+encoder comparison, Whisper policy and low-level kernel/backend tests are
+unchanged. No acceleration supplies a test recipe or tolerance. No serving,
+scheduler or acceleration implementation is changed by this policy revision.
+
+Sampler observations clone tensors at the existing resource boundary, before
+warmup/capture. Captured clones update on actual replay. Sampling choices and
+runtime state are never substituted. These are instrumented correctness runs;
+their timings are not performance evidence. Positive controls compare stock HF
+BF16 eager and SDPA on a shared prefix; negative controls corrupt choices,
+suppression, hidden-state direction and scale. The existing batch/walk/removal
+coverage is retained. Bounded model-output agreement does not establish speech
+intelligibility, full-service quality, all supported shapes or benchmark parity.
+Those claims retain their existing separate evidence requirements.
 
 ### Reference choice for Whisper
 
