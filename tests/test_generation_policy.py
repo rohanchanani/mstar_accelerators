@@ -22,6 +22,24 @@ def test_identical_greedy_choice_passes_even_if_topk_omits_it_at_a_tie():
     assert compare_greedy('same', GreedyOutput(logits, 0), GreedyOutput(logits, 0))['passed']
 
 
+def test_rank_boundary_ties_do_not_depend_on_token_numbering():
+    # The reference choice ties for fourth; only two of five tied candidates
+    # fit into topk(5). Every permutation must have the same rank verdict.
+    a = torch.tensor([9., 8., 7., 6., 6., 6., 6., 6.])
+    b = torch.tensor([8., 7., 6., 5., 5., 5., 5., 9.])
+    for shift in range(len(a)):
+        check = compare_greedy('boundary', GreedyOutput(a.roll(shift), shift),
+                               GreedyOutput(b.roll(shift), (7 + shift) % len(b)))
+        assert check['passed'] and check['actual_rank_of_reference'] == 4
+    a[7] = 5.  # Now seven strictly greater scores: still a failure.
+    assert not compare_greedy('outside', GreedyOutput(a, 0), GreedyOutput(b, 7))['passed']
+
+
+def test_both_samplers_may_choose_any_exact_argmax_tie():
+    logits = torch.zeros(16)
+    assert compare_greedy('ties', GreedyOutput(logits, 4), GreedyOutput(logits, 9))['passed']
+
+
 @pytest.mark.parametrize('fault', ['wrong_draw', 'wrong_logits', 'suppressed', 'nan', 'shape', 'reference'])
 def test_generation_rejects_broken_outputs(fault):
     b = torch.tensor([8., 3., 2., 1., 0., -1., float('-inf')])

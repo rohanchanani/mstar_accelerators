@@ -226,13 +226,20 @@ and [PyTorch's numerical accuracy guidance](https://docs.pytorch.org/docs/2.9/no
   with the same pinned logical weights. The harness interprets M*'s logical
   conditioning and history; it imports no candidate kernels into the reference.
   Thinker retains the ordinary M* reference at the same BF16 precision.
-- `generation-reciprocal-top5-v1` observes the actual runtime sampler's input and
+- `generation-reciprocal-top5-ties-v2` observes the actual runtime sampler's input and
   returned token. Each token must be an argmax of its own logits after the
   centrally interpreted repetition penalty. Suppressed positions must match.
   If the reference and candidate choose different tokens, each choice must be
   among the other's five highest logits, following vLLM's reciprocal top-N rule.
   Log probabilities and reference regret are reported. This is a rank-based
   generation gate, not a bound on the whole probability distribution.
+  Rank is one plus the number of strictly greater scores, including exact ties
+  at the fifth-place boundary. This explicitly refines the index-list check:
+  [PyTorch does not guarantee stable indices for tied `topk` values](https://docs.pytorch.org/docs/2.9/generated/torch.topk.html).
+  The original rule falsely rejected a reference choice tied for fourth because
+  `topk` returned other tokens with the identical BF16 score. Neither the rank
+  cutoff nor a numerical tolerance is increased; no near-equal values are
+  treated as ties. Earlier receipts keep their original policy and verdicts.
 - The reference scores the **same actual token prefix**, including earlier codec
   groups, rather than allowing two trajectories to diverge and then comparing
   unrelated states. Every supplied token is still scored; teacher forcing does

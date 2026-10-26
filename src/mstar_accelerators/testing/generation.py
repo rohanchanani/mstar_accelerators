@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn.functional as F
 
-POLICY = "generation-reciprocal-top5-v1"
+POLICY = "generation-reciprocal-top5-ties-v2"
 
 @dataclass(frozen=True)
 class GreedyOutput:
@@ -38,16 +38,25 @@ def compare_greedy(name, actual, expected):
     # A near tie between implementations does not excuse a non-greedy sampler.
     if a[token] != a.max():
         return result | {"reason": "sample is not an argmax of its own penalized logits", "token": token}
-    ref_token = int(b.argmax())
-    if expected.token != ref_token:
+    ref_token = expected.token
+    if not 0 <= ref_token < b.numel() or b[ref_token] != b.max():
         return result | {"reason": "reference token is not greedy"}
     k = min(5, int(a.isfinite().sum()))
     top_a, top_b = a.topk(k).indices, b.topk(k).indices
-    passed = token == ref_token or bool((top_b == token).any() and (top_a == ref_token).any())
+    # topk's indices arbitrarily omit some tokens tied at its boundary. Rank
+    # by strictly greater scores so token numbering cannot decide acceptance.
+    rank_a = 1 + int((a > a[ref_token]).sum())
+    rank_b = 1 + int((b > b[token]).sum())
+    passed = rank_a <= k and rank_b <= k
     log_a, log_b = a.log_softmax(-1), b.log_softmax(-1)
     return result | {"passed": passed, "reason": "reciprocal top choices" if passed else "top choices disagree",
         "token": token, "reference_token": ref_token, "tokens_equal": token == ref_token,
         "top_k": k, "actual_top_ids": top_a.tolist(), "reference_top_ids": top_b.tolist(),
+        "actual_top_logits": a[top_a].tolist(), "reference_top_logits": b[top_b].tolist(),
+        "actual_rank_of_reference": rank_a,
+        "reference_rank_of_actual": rank_b,
+        "actual_logit_of_reference": float(a[ref_token]),
+        "reference_logit_of_actual": float(b[token]),
         "actual_logprob": float(log_a[token]), "reference_logprob": float(log_b[token]),
         "reference_regret": float(log_b[ref_token] - log_b[token])}
 
