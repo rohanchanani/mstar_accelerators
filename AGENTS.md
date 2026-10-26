@@ -94,3 +94,13 @@ coverage extends the consumer/constraint solver, using the declaration's facts.
 Backend conformance and compiler unit tests test their own mechanisms; they are
 not alternate acceleration qualification policies. Ad hoc investigative tests
 belong in scratch with explicit evidence scope.
+
+## Investigations must overlap execution with reasoning
+
+During debugging and root-cause investigations, launch measurements and tests asynchronously by default. Keep their process/job identity, logs and exit status so they can be checked without blocking ongoing analysis. The objective is the shortest time to an evidenced cause and correct repair, not the largest number of test runs.
+
+Before launching a run, state the concrete unanswered question, the relevant owner/contract, what each plausible outcome would imply, and why existing results or source inspection cannot answer it. Choose the cheapest discriminating experiment; reuse saved inputs, outputs and loaded processes. Do not rerun a whole suite to answer a local question.
+
+While a job runs, continue tracing the relevant source and assessing results already available. Assess partial and completed results immediately, even if other jobs are still running; update the hypothesis and next action from that evidence. Do not make launch-wait-poll the investigation workflow, and do not treat a running test as permission to stop thinking. Do not launch additional tests merely to appear busy. Only wait when useful independent analysis is exhausted and a specific pending result genuinely blocks the next decision.
+
+Keep reference validity, migration preservation, numerical agreement and application quality as separate claims. Do not search for an oracle or adjust acceptance until the candidate passes. A harness correction needs an independently demonstrated defect and a separately justified central policy change; retain the old failures and state the limits of the new evidence.
