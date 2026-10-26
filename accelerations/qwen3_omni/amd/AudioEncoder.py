@@ -38,5 +38,5 @@ acceleration = Acceleration(
     when=When(Eq("node_name", "audio_encoder"), Eq("device_type", "cuda"), Eq("platform", "rocm"),
               Eq("dtype", torch.bfloat16), Eq("tp_size", 1), Eq("sp_size", 1), Range("batch_size", 1, 1)),
     implementation=Implementation(prepare=prepare_audio, resources=tensor_resource_requests,
-        execution=TensorForwardExecution(compile=CompilePolicy(enabled=True, dynamic=True, platform_overrides=True),
+        execution=TensorForwardExecution(compile=CompilePolicy(enabled=True, dynamic=None, platform_overrides=True),
                                          autocast_dtype=torch.bfloat16)))
