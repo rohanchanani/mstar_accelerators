@@ -154,7 +154,7 @@ def test_a_book_requests_donor_policy_without_a_model_program_install():
     from mstar_accelerators.implementations.qwen3_omni.amd.preparation import prepare_program
 
     entries = load_accelerations(str(Path(__file__).parents[1] / 'accelerations/qwen3_omni/amd'))
-    book, = entries.values()
+    book = entries["Talker"]
     assert book.implementation.prepare is prepare_program
     execution = book.implementation.execution
     assert execution == TensorForwardExecution(

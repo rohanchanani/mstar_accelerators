@@ -32,6 +32,8 @@ def _plan_annotation(spec):
 
 
 def _tensor_program_lines(contract):
+    if contract.dimensions is not None or any(spec.present_when is not None or "tokens" in spec.shape for spec in contract.outputs):
+        return _row_tensor_program_lines(contract)
     result_fields = []
     for spec in contract.outputs:
         if any(isinstance(dimension, str) and dimension != "batch" for dimension in spec.shape):
@@ -39,7 +41,7 @@ def _tensor_program_lines(contract):
         dimensions = ["batch_size" if dimension == "batch" else repr(dimension)
                       for dimension in spec.shape]
         shape = "(" + ", ".join(dimensions) + ("," if len(dimensions) == 1 else "") + ")"
-        dtype = str(spec.dtype) if spec.dtype is not None else "self.dtype"
+        dtype = str(spec.dtypes(None)[0]) if spec.dtype is not None else "self.dtype"
         value = f"torch.zeros({shape}, dtype={dtype}, device=self.device)"
         if spec.per_request:
             value = f"tuple({value} for _ in range(batch_size))"
@@ -262,6 +264,40 @@ def main(argv=None):
     print(json.dumps({"created": [str(path) for path in paths]}, sort_keys=True))
     return 0
 
+
+
+def _row_tensor_program_lines(contract):
+    return [
+        "class Program(torch.nn.Module):",
+        "    def __init__(self, binding, resources):",
+        "        super().__init__()",
+        "        self.contract = binding.submodule.logical_contract()",
+        "        self.dtype, self.device = binding.dtype, binding.device",
+        "",
+        "    def prepare_rows(self, inputs):",
+        "        # Optional physical preparation before runtime padding. Preserve logical geometry.",
+        "        return tuple(inputs)",
+        "",
+        "    def preprocess(self, graph_walk, engine_inputs, inputs):",
+        "        return {'inputs': inputs}",
+        "",
+        "    def forward_batched(self, graph_walk, engine_inputs, inputs):",
+        "        from mstar_accelerators.compiler import allocate_results",
+        "        values = allocate_results(self.contract, inputs, engine_inputs, self.dtype, self.device, zero=True)",
+        "        result = self.contract.result_type(**values)",
+        "        return pack_tensor_result(result, self.contract, engine_inputs.request_ids)",
+        "",
+        "    forward = forward_batched",
+        "",
+        "    def can_batch(self, batch, inputs):",
+        "        return True",
+        "",
+        "    def get_accelerator_graph_configs(self, device, tp_world_size=1):",
+        "        return []",
+        "",
+        "def prepare(binding, resources):",
+        "    return Program(binding, resources)",
+    ]
 
 if __name__ == "__main__":
     raise SystemExit(main())

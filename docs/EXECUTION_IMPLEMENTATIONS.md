@@ -72,6 +72,7 @@ their existing owners.
 
 | Hook | Physical decision it expresses |
 | --- | --- |
+| `prepare_rows(inputs)` | Optional physical tensor preparation before runtime padding; preserves logical row order, walks, lengths and declared effects. |
 | `preprocess(graph_walk, engine_inputs, inputs)` | Packs already-interpreted logical rows into the keyword arguments used by the forward method. |
 | `forward(graph_walk, engine_inputs, **kwargs)` | Computes one request's physical output storage, using logical contract field names. It may return the same `BatchedModelOutput` carrier as the batched method. |
 | `forward_batched(graph_walk, engine_inputs, **kwargs)` | Computes a batch and returns physical output storage through `BatchedModelOutput`. |
@@ -92,6 +93,18 @@ The physical output uses **logical contract field names**, not graph-edge names.
 result record into row-addressed physical output storage. This is useful for
 simple programs and generated placeholders; a specialized program can construct
 the same physical output representation directly.
+
+Logical contracts may resolve named dimensions from each real input row and declare
+conditional output presence from that row's walk and request metadata. The shared
+binder checks exact resolved shapes and required outputs; implementations do not
+choose those rules. Physical output fields unused by the logical row are omitted
+from its typed result. Original logical inputs remain separate from prepared
+physical rows.
+
+An output may declare a nonempty tuple of allowed dtypes. The binder accepts
+only those dtypes and preserves the returned tensor without a cast; generated
+output storage uses the first declared dtype. Thinker token IDs allow int64
+and int32, preserving the existing captured and eager representations.
 
 The runner removes padded rows, remaps capture handles and preserves result
 storage before the bound result adapter runs. `compiler.bind_tensor_result`
@@ -157,9 +170,9 @@ physical behavior, including its chosen decode capture. That requirement comes
 from the experiment. Sharing a logical reference with another acceleration does
 not impose the other acceleration's physical program or runner choices.
 
-The A declaration selects Talker through `mstar_accelerators`; its program is
-owned by this repository. The deployment's other four Qwen nodes keep their
-existing physical deployment path. See `QWEN3_OMNI_AMD.md` for the concrete
+The AMD deployment selects Talker, Thinker and the audio encoder through
+`mstar_accelerators`. Their physical programs are owned by this repository;
+vision and Code2Wav retain their existing deployment paths. See `QWEN3_OMNI_AMD.md` for the concrete
 hardware, environment and service checks.
 
 The qualification consumer must execute the selected prepared program through

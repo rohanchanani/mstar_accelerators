@@ -54,7 +54,8 @@ def prepare_program(binding, resources):
 
     config = deepcopy(binding.model.config)
     config.talker_text.moe_backend = "triton"
-    values = binding.model.logical_weights().load()
+    source = binding.model.logical_weights()
+    values = source.load(name for name in source.by_name if name.startswith("talker."))
     rules = stacked_parameter_rules(config.talker_text.num_experts)
     with torch.device("meta"):
         talker = Qwen3OmniTalkerModel(config, comm_group=binding.tp_group)
@@ -77,6 +78,8 @@ def prepare_program(binding, resources):
         if missing:
             raise ValueError(f"AMD Talker program did not initialize parameters: {sorted(missing)}")
         module.eval()
+    from .moe import select_expert_kernels
+    select_expert_kernels(talker)
     prepare_moe_weights(talker)
     predictor.consolidate_stacked_weights()
     tts_embeddings = torch.stack([

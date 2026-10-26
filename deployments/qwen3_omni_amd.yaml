@@ -19,5 +19,5 @@ node_groups:
     ranks: [0]
 runtime_extension:
   factory: mstar_accelerators.backends.torch.device_runtime:DeviceTorchRuntime
-  nodes: [Talker]
+  nodes: [Thinker, Talker, audio_encoder]
   accelerations: accelerations/qwen3_omni/amd

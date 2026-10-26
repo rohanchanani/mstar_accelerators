@@ -52,7 +52,8 @@ class TalkerOracle:
             raise ValueError("The portable oracle supports CPU float32 or float64")
         self.config = model.config
         self.dtype = dtype
-        self.weights = model.logical_weights().load()
+        source = model.logical_weights()
+        self.weights = source.load(name for name in source.by_name if name.startswith("talker."))
         # Replace one entry at a time so the source dictionary does not retain
         # every BF16 tensor alongside a complete second FP32 dictionary.
         for name in self.weights:

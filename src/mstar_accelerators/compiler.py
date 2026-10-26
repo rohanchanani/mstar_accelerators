@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import torch
+from mstar.model.contract import row_dimensions, tensor_shape
 
 
 @dataclass(frozen=True)
@@ -89,19 +90,14 @@ class DefaultBinding:
                 value = logical
                 for component in spec.source.split("."):
                     value = value[component] if isinstance(value, Mapping) else getattr(value, component)
-                expected = _shape(spec.shape, tokens=getattr(logical, "input_seq_len", None), batch=batch)
+                expected = tensor_shape(spec, row_dimensions(self.contract, logical, walk, None, batch))
                 if tuple(value.shape) != expected:
                     raise ValueError(f"{spec.name}: expected logical shape {expected}, got {tuple(value.shape)}")
                 rows.append(value.to(dtype=spec.dtype or self.binding.dtype).contiguous().to(
                     self.binding.device, non_blocking=True))
             inputs[spec.name] = tuple(rows)
-        outputs = {}
-        for spec in self.contract.outputs:
-            shape = _shape(spec.shape, tokens=None, batch=batch)
-            values = tuple(torch.empty(shape, dtype=spec.dtype or self.binding.dtype,
-                                       device=self.binding.device)
-                           for _ in range(batch if spec.per_request else 1))
-            outputs[spec.name] = values if spec.per_request else values[0]
+        outputs = allocate_results(self.contract, invocation.inputs, invocation.engine_inputs,
+                                   self.binding.dtype, self.binding.device)
         return self.call_type(graph_walk=invocation.graph_walk, inputs=self.input_type(**inputs),
                               outputs=self.output_type(**outputs),
                               plan_results=self.plan_type(**{
@@ -118,7 +114,8 @@ class DefaultBinding:
         for spec in self.contract.outputs:
             value = getattr(call.outputs, spec.name)
             for tensor in value if spec.per_request else (value,):
-                tensor.zero_()
+                if tensor is not None:
+                    tensor.zero_()
         return self.result(call)
 
     def acquire(self, facts):
@@ -149,7 +146,7 @@ def default_resource_requests(binding):
             if binding.node_name in spec.nodes and isinstance(spec, KVSpec)}
 
 
-def pack_tensor_result(result, contract):
+def pack_tensor_result(result, contract, request_ids=None):
     """Organize logical tensors for the tensor runner, using logical field names.
 
     Row organization is physical. Routing these values onto graph edges remains
@@ -157,16 +154,26 @@ def pack_tensor_result(result, contract):
     """
     from mstar.model.submodule_base import BatchedModelOutput
 
-    rows, packed = {}, {}
+    rows, packed, per_rid = {}, {}, {}
     for spec in contract.outputs:
         value = getattr(result, spec.name)
         if spec.per_request:
-            rows[spec.name] = torch.stack(tuple(value))
+            if value and isinstance(value[0], torch.Tensor) and all(
+                isinstance(row, torch.Tensor) and row.shape == value[0].shape for row in value
+            ):
+                rows[spec.name] = torch.stack(tuple(value))
+            else:
+                for index, row in enumerate(value):
+                    if row is not None:
+                        per_rid.setdefault(index, {})[spec.name] = [row]
         elif spec.shape and spec.shape[0] == "batch":
             rows[spec.name] = value
         else:
             packed[spec.name] = value
-    return BatchedModelOutput(row_outputs=rows or None, packed_outputs=packed)
+    if per_rid and request_ids is None:
+        raise ValueError("ragged tensor results require logical request IDs")
+    return BatchedModelOutput(row_outputs=rows or None, packed_outputs=packed,
+        per_rid_outputs={request_ids[i]: values for i, values in per_rid.items()})
 
 
 def bind_tensor_result(binding):
@@ -186,7 +193,8 @@ def bind_tensor_result(binding):
                 and not any(raw.per_rid_outputs.values())):
             # Some state-only walks produce no logical outputs. The model's
             # mapper knows that walk and does not manufacture unused tensors.
-            return None
+            if contract.dimensions is None and not any(spec.present_when for spec in contract.outputs):
+                return None
         values = {}
         count = len(invocation.request_ids)
         for spec in contract.outputs:
@@ -199,7 +207,7 @@ def bind_tensor_result(binding):
             else:
                 rows = []
                 for rid in invocation.request_ids:
-                    value = raw.per_rid_outputs[rid][spec.name]
+                    value = raw.per_rid_outputs.get(rid, {}).get(spec.name)
                     if isinstance(value, (list, tuple)):
                         if len(value) != 1:
                             raise ValueError(f"{spec.name}: expected one tensor per row")
@@ -215,17 +223,45 @@ def bind_tensor_result(binding):
                     value = rows[0]
                 else:
                     raise ValueError(f"{spec.name}: a whole-invocation output needs packed storage")
-            expected = _shape(spec.shape, tokens=None, batch=count)
-            tensors = value if spec.per_request else (value,)
+            tensors = list(value if spec.per_request else (value,))
             if spec.per_request and len(tensors) != count:
                 raise ValueError(f"{spec.name}: expected {count} result rows")
-            for tensor in tensors:
+            for index, tensor in enumerate(tensors):
+                logical = invocation.inputs[index if spec.per_request else 0]
+                rid = invocation.request_ids[index if spec.per_request else 0]
+                info = invocation.engine_inputs.per_request_info.get(rid)
+                walk = getattr(logical, "graph_walk", None) or invocation.graph_walk
+                present = spec.present_when is None or spec.present_when(logical, walk, info)
+                if not present:
+                    tensors[index] = None
+                    continue
+                expected = tensor_shape(spec, row_dimensions(contract, logical, walk, info, count))
                 if not isinstance(tensor, torch.Tensor) or tuple(tensor.shape) != expected:
                     raise ValueError(f"{spec.name}: expected logical output shape {expected}")
-                dtype = spec.dtype or binding.dtype
-                if tensor.dtype != dtype:
-                    raise ValueError(f"{spec.name}: expected logical output dtype {dtype}, got {tensor.dtype}")
-            values[spec.name] = value
+                dtypes = spec.dtypes(binding.dtype)
+                if tensor.dtype not in dtypes:
+                    raise ValueError(f"{spec.name}: expected logical output dtype in {dtypes}, got {tensor.dtype}")
+            values[spec.name] = tuple(tensors) if spec.per_request else tensors[0]
         return contract.result_type(**values)
 
     return result
+
+
+def allocate_results(contract, inputs, engine_inputs, dtype, device, *, zero=False):
+    """Allocate the model-declared row shapes; no inferred optional fields."""
+    outputs = {}
+    count = len(inputs)
+    for spec in contract.outputs:
+        values = []
+        for index in range(count if spec.per_request else 1):
+            logical = inputs[index]
+            rid = engine_inputs.request_ids[index] if engine_inputs is not None else index
+            info = engine_inputs.per_request_info.get(rid) if engine_inputs is not None else None
+            walk = getattr(logical, "graph_walk", None) or getattr(info, "graph_walk", None)
+            if spec.present_when is not None and not spec.present_when(logical, walk, info):
+                values.append(None)
+                continue
+            shape = tensor_shape(spec, row_dimensions(contract, logical, walk, info, count))
+            values.append((torch.zeros if zero else torch.empty)(shape, dtype=spec.dtypes(dtype)[0], device=device))
+        outputs[spec.name] = tuple(values) if spec.per_request else values[0]
+    return outputs

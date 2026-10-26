@@ -313,4 +313,9 @@ class TalkerCaseAdapter:
 
 
 def adapters(model, **kwargs):
-    return {TalkerSubmodule: TalkerCaseAdapter(model, **kwargs)}
+    from .qwen3_omni_nodes import NodeCaseAdapter
+    from mstar.model.qwen3_omni.thinker_logical import ThinkerLogical
+    from mstar.model.qwen3_omni.audio_logical import AudioEncoderLogical
+    return {TalkerSubmodule: TalkerCaseAdapter(model, **kwargs),
+            ThinkerLogical: NodeCaseAdapter(model, node="Thinker", **kwargs),
+            AudioEncoderLogical: NodeCaseAdapter(model, node="audio_encoder", **kwargs)}

@@ -1,10 +1,12 @@
 # Qwen3-Omni on AMD MI300X
 
 This is the single retained AMD implementation used by the measured service.
-It serves the full five-node graph with BF16 parameters, TP1/SP1, ordinary
+It serves the full five-node graph with BF16 execution, TP1/SP1, ordinary
 sampling, and optional captured execution. Eager execution implements the same
 semantics. MStar owns scheduling, request state, allocation and output lifetime;
-the Talker acceleration owns its physical program and weight preparation.
+the Talker, Thinker and audio-encoder accelerations own their physical programs
+and weight preparation. The audio encoder retains FP32 weights with BF16
+autocast, matching the measured service.
 
 ## Install and prepare
 
@@ -43,10 +45,12 @@ when reproducing the measured configuration.
 
 ## Implementation and checks
 
-`accelerations/qwen3_omni/amd/Talker.py` declares the Talker implementation.
-Its physical program and kernels live in
+`accelerations/qwen3_omni/amd/{Talker,Thinker,AudioEncoder}.py` declare the
+selected implementations. Their physical programs and kernels live in
 `src/mstar_accelerators/implementations/qwen3_omni/amd/`.
-The paired runtime contains the selected Thinker, sampling and MoE optimizations.
+The paired runtime owns logical model semantics and shared sampling/resource
+mechanisms. Model-specific MoE, projection/norm and audio optimizations live
+with the accelerator implementations.
 Source attribution is retained in that implementation's `PROVENANCE.md`.
 
 `bash tools/qwen3_omni/run_amd.sh ../mstar /absolute/path/to/amd-work /opt/rocm-7.2.0`

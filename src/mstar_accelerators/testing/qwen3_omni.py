@@ -59,7 +59,7 @@ class _Worker:
         report = run_registry(entries, consume).to_dict()
         report.update(policy=DEFAULT.name, checkpoint=str(Path(self.options['checkpoint']).resolve()),
                       device=str(self.device), torch=torch.__version__, hip=torch.version.hip,
-                      scope='actual registered Talker program; finite short greedy trajectories; independent CPU oracle',
+                      scope='actual registered programs; bounded model-adapter trajectories and references',
                       target_execution=any(row.details.get('executed', False) for row in self.record['results']))
         self.record['report'] = report
 
