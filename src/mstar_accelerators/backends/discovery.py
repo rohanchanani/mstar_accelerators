@@ -3,7 +3,7 @@
 Discovery never reserves a device. Qualification and other tooling may consume
 these facts; allocation and settlement remain with M* and the backend runtime.
 """
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 import importlib.util
 import os
 
@@ -21,6 +21,7 @@ class Environment:
     reason: str = ''
     memory_bytes: int | None = None
     host_threads: int = 4
+    runtime_options: dict = field(default_factory=dict)
 
     def facts(self):
         return {'device_type': self.device_type, 'platform': self.platform}
@@ -35,7 +36,7 @@ class Environment:
     def runtime(self, registry):
         from importlib import import_module
         module, name = self.runtime_factory.split(':')
-        return getattr(import_module(module), name)({'accelerations': registry})
+        return getattr(import_module(module), name)({**self.runtime_options, 'accelerations': registry})
 
     def stream(self, device):
         if self.device_type == 'mstar_pi':
@@ -83,5 +84,6 @@ def discover():
             else:
                 context.close()
     result.append(Environment('pi', 'mstar_pi:0', 'mstar_pi', 'cpu', 1, None,
-        'mstar_accelerators.backends.pi.runtime:PiRuntime', available=available, reason=reason))
+        'mstar_accelerators.backends.pi.runtime:PiRuntime', available=available, reason=reason,
+        runtime_options={'native': {'wait_timeout_ms': 180000, 'validation': True}}))
     return tuple(result)

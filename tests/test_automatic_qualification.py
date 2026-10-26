@@ -256,3 +256,18 @@ def test_available_binding_uses_real_device_and_unavailable_binding_stays_unknow
     assert jobs
     assert all(record['static_support'] == 'UNKNOWN' for job in jobs
                if not job.environment.available for record in job.bindings)
+
+
+def test_inferred_pi_lifecycle_preserves_required_native_validation(monkeypatch):
+    import sys
+    from mstar_accelerators.backends import discovery
+    real_find = discovery.importlib.util.find_spec
+    monkeypatch.setattr(discovery.importlib.util, 'find_spec',
+                        lambda name: None if name == 'mstar_pi' else real_find(name))
+    environment = next(env for env in discovery.discover() if env.device_type == 'mstar_pi')
+    monkeypatch.setitem(sys.modules, 'mstar_accelerators.backends.pi.runtime',
+                        SimpleNamespace(PiRuntime=lambda config: config))
+    assert environment.runtime('chosen:entries') == {
+        'accelerations': 'chosen:entries',
+        'native': {'wait_timeout_ms': 180000, 'validation': True}}
+    assert environment.receipt()['runtime_options']['native']['validation'] is True
