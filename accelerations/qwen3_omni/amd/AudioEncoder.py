@@ -5,7 +5,7 @@ from mstar.model.qwen3_omni.audio_logical import AudioEncoderLogical
 from mstar.model.qwen3_omni.results import AudioResult
 from mstar_accelerators.backends.torch.tensor_forward import tensor_resource_requests
 from typing import Literal
-from mstar_accelerators import Acceleration, Eq, Implementation, Range, TensorForwardExecution, When
+from mstar_accelerators import Acceleration, Eq, Implementation, TensorForwardExecution, When
 import torch
 from mstar_accelerators.implementations.qwen3_omni.amd.audio_program import prepare_audio
 
@@ -33,10 +33,12 @@ class Call:
     row_walks: tuple[str, ...]
 
 
+# Preserve grouped scheduling: the existing runner decomposes this non-batched
+# program into per-request forwards. Deployment admission bounds the group size.
 acceleration = Acceleration(
     reference=AudioEncoderLogical,
     when=When(Eq("node_name", "audio_encoder"), Eq("device_type", "cuda"), Eq("platform", "rocm"),
-              Eq("dtype", torch.bfloat16), Eq("tp_size", 1), Eq("sp_size", 1), Range("batch_size", 1, 1)),
+              Eq("dtype", torch.bfloat16), Eq("tp_size", 1), Eq("sp_size", 1)),
     implementation=Implementation(prepare=prepare_audio, resources=tensor_resource_requests,
         execution=TensorForwardExecution(compile=CompilePolicy(enabled=True, dynamic=None, platform_overrides=True),
                                          autocast_dtype=torch.bfloat16)))
