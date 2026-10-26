@@ -182,15 +182,11 @@ def test_registered_implementation_chooses_provider_through_the_actual_reference
                                 lang_to_id={"<|en|>": 1}, task_to_id={"transcribe": 2})
     features = torch.ones(4, 6)
     expected = torch.ones(3, 8)
-    model = SimpleNamespace(
-        config=config,
-        create_submodule=lambda name: WhisperEncoderSubmodule(config),
-        get_node_resources=list,
-        get_graph_walk_graphs=lambda: {
-            "prefill": SimpleNamespace(get_nodes=lambda: {"audio_encoder": None}),
-        },
-        logical_weights=lambda: SimpleNamespace(specs=(), load=lambda names: {}),
-    )
+    model = whisper_model.WhisperModel.__new__(whisper_model.WhisperModel)
+    model.config = config
+    model.create_submodule = lambda name: WhisperEncoderSubmodule(config)
+    model.get_node_resources = list
+    model.logical_weights = lambda: SimpleNamespace(specs=(), load=lambda names: {})
     monkeypatch.setattr(whisper_model, "WhisperModel", lambda checkpoint: model)
     monkeypatch.setattr(whisper, "audio_inputs", lambda *args, **kwargs: (
         {"audio_features": [features]}, {"scope": "synthetic host fixture"},
@@ -246,13 +242,13 @@ def test_registered_implementation_chooses_provider_through_the_actual_reference
     if settlement_failure:
         with pytest.raises(RuntimeError, match="completion is uncertain"):
             worker.run()
-        assert len(worker.session.prepared) == 1 and worker.session.bindings
+        assert len(worker.session.engines) == 1 and worker.session.bindings
         assert calls == ["explicit provider preparation", "fake provider submission", "lease close"]
         # Simulate the existing owner's later successful drain. The failed case
         # itself did not drop roots, publish evidence, or submit another case.
         worker.close()
         assert calls[-2:] == ["drain", "program close"]
-        assert worker.session.prepared == [] and "report" not in record
+        assert worker.session.engines == [] and "report" not in record
         return
     worker.run()
     report = record["report"]

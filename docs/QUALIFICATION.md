@@ -6,17 +6,32 @@ The external platform owns qualification technique, correctness policy and its
 evidence. M* owns serving. The logical reference still identifies the transition
 `R[W,C](I,S) -> (O,S',E)`; testing that transition is a separate engineering job.
 
-The harness is literally:
+The public entry point is `python -m mstar_accelerators.testing`. It accepts a
+registry subset, an environment/assets configuration and a report destination.
+There is no driver/plugin selection. Unknown configuration keys are rejected,
+including attempts to set comparison tolerances, reference functions, batch
+coverage, decode-step coverage or solver bounds.
 
-```python
-report = run_registry(accelerations, consumer)
-```
+`testing/policy.py` resolves reference adapters from the logical model and fixes
+the existing differential consumer and numerical comparator. Environment hosts
+supply model assets, placement and managed process/device lifetimes. They do not
+choose the correctness procedure. The unchanged Qwen default domain is batches
+1, 2 and 8 with three decode steps; Whisper retains its declared-alternative,
+paired-state, lifetime and sampling policies. Earlier reduced research runs are
+still evidence for their recorded scope, not full coverage.
 
-`consumer(name, acceleration) -> Result` returns PASS, FAIL or SKIP. An arbitrary
-consumer can implement source review, differential execution, fuzzing, a proof
-checker, an LLM audit, or no checks at all. The outer loop gives none of those
-techniques mandatory philosophical status. Its consumer and policy identities
-must be reported so a PASS has an interpretable meaning.
+Candidate execution uses M*'s actual engine. Qwen retains its `EngineManager`
+path. Whisper uses `Engine.load_model`, `prepare_inputs` and `exec`; the engine
+constructs resources, selects/acquires execution, admits, plans, adapts results,
+commits and releases. A test-side observer at the existing logical result
+adaptation boundary reads pre-commit state without replacing execution or
+commit. The independent reference and initial reference-produced fixture state
+remain test-owned; they are not candidate execution paths.
+
+The low-level `run_registry(accelerations, consumer)` loop remains reusable
+inside platform tests. It is not a user-configurable qualification policy.
+Changes to the harness, including precision accommodations and false-PASS fixes,
+require separate, justified PRs owned by the optimization platform.
 
 The first real consumer is `DifferentialConsumer(adapters, comparator)`:
 
@@ -55,17 +70,18 @@ hardware environment a failing test suite.
 | `testing/numerics.py` | Centralized numerical and exact-value policy |
 | `testing/sampling.py` | Bounded categorical support, distribution and seed-set policy, independent of RNG algorithm |
 | `testing/models/whisper.py` | Constructible Whisper cases, independent executable reference and state interpretation |
-| `testing/pi.py` | Current target driver; existing M* managed-worker ownership and release |
+| `testing/pi.py` | Pi execution environment; existing M* managed-worker ownership and release |
 | `testing/distributed.py` | CPU role environment using the same consumer, binding and M* agreement |
 | `testing/environments.py` | Whole-corpus aggregation across configured execution environments |
-| `testing/__main__.py` | Small command entry point, driver/config selection and report/exit policy |
+| `testing/__main__.py`, `configuration.py` | Central entry point, environment-only schema and report/exit policy |
+| `testing/policy.py` | Reference resolution, coverage defaults and fixed comparator |
+| `testing/runtime.py` | Case placement and read-only observations around the actual M* engine |
 | `testing/whisper.py` | Shared input, observation, state and lifetime helpers for the centralized model adapter |
 
-The driver is selected by `module:symbol`, consumes a registry specification and
-a driver-owned configuration dictionary, and returns a report. The environment
-coordinator composes the Pi and CPU role environments without changing the
-outer consumer or serving declarations. The present model adapter supports
-Whisper; the CPU environment is a bounded TP2 deployment, not a universal
+The environment coordinator has a fixed set of managed execution environments
+(`pi`, CPU TP2, and `rocm`). All use the same central policy. Environment
+configuration describes assets and placement; it cannot import executable code.
+The CPU environment remains a bounded TP2 deployment, not a universal
 distributed runner.
 
 ## 3. Test generation: actual support, limited search
@@ -254,7 +270,7 @@ tests belong in scratch. The actual API service and host engine regressions
 continue to test product/framework integration at their own boundaries.
 
 The adapter settles and closes each successfully observed case before the next;
-the Pi driver retains the managed exceptional drain/fatal boundary and final
+the Pi environment host retains the managed exceptional drain/fatal boundary and final
 owner release. That synchronization is at the
 qualification observation/release boundary; serving stream behavior is unchanged.
 
@@ -329,7 +345,7 @@ has its own separately documented RNG mapping and backend conformance gate.
 Those checks establish a different boundary from registered acceleration
 qualification. Serving consumes neither verdict nor distribution policy.
 
-## 6. Running the first driver
+## 6. Running centralized qualification
 
 Without assets, ordinary discovery is a successful command with an honest SKIP
 report and no native initialization:
@@ -358,11 +374,11 @@ python backends/pi/tools/run_hardware.py --managed --deadline 3600 -- \
     --report /absolute/path/to/registry.json --require-all-pass
 ```
 
-The driver supplies the corpus and the managed execution environment to the
-case adapters. Each implementation chooses its programming model and any
-optional graph provider; the driver does not inject one into generic binding.
+The environment host supplies the corpus and managed execution context to the
+central policy. Each implementation chooses its programming model and any
+optional graph provider; the environment host does not inject one into generic binding.
 
-Consume the complete corpus. The driver does not select modes or supply a list
+Consume the complete corpus. The environment host does not select modes or supply a list
 of individual tests. The differential consumer derives the current coverage from
 each acceleration's declaration. The result has one verdict per actual
 registration: a combined decoder includes both solved alternatives; intentional
@@ -382,11 +398,10 @@ test a different boundary and are not silently loosened by this node-level polic
 ## 7. Whole-corpus consumption across native and CPU roles
 
 Package 3 retains the native corpus and adds an explicitly CPU authoring target.
-Use the existing qualification command with the environment coordinator:
+Use the same qualification command with multiple execution environments:
 
 ```bash
 python -m mstar_accelerators.testing \
-  --driver mstar_accelerators.testing.environments:run \
   --registry /absolute/path/to/accelerations \
   --config /absolute/path/to/environments.json \
   --report /absolute/path/to/qualification.json --require-all-pass
@@ -413,7 +428,7 @@ Both environments receive the entire corpus. They use the same
 numerical/exact policies. There is no registration or walk filter. Static
 non-applicability is recorded separately from a missing applicable target or
 unresolved case. A PASS elsewhere cannot erase an observed failure or an
-applicable missing-evidence SKIP. Startup/teardown failures remain driver FAIL
+applicable missing-evidence SKIP. Startup/teardown failures remain environment FAIL
 even if they occur outside an active registration.
 
 The final report has one aggregate verdict per registration. Its nested

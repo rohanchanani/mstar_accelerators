@@ -41,10 +41,6 @@ def _compare(name, actual, expected, *, dtype=None):
     """Host-test compatibility; numerical policy is owned centrally."""
     return assert_close(name, actual, expected, dtype=dtype)
 
-def _run(selected, invocation, stream):
-    result = selected.run(invocation, stream)
-    return result, dict(getattr(selected.workspace, "extra_outputs", {}))
-
 def _resource_specs(model):
     specs = model.get_node_resources()
     budgets = {KV_CACHE: 16 * 1024**2, CROSS_KV_CACHE: 56 * 1024**2}
@@ -87,6 +83,8 @@ class QualificationSession:
     """
 
     def __init__(self):
+        self.engines = []
+        self.assemblies = []
         self.resources = {}
         self.resource_sets = []
         self.bindings = []
@@ -94,6 +92,13 @@ class QualificationSession:
         self.retained = []
 
     def close(self):
+        for engine in reversed(self.engines):
+            engine.shutdown()
+        self.engines.clear()
+        for assembly in self.assemblies:
+            if assembly.close is not None:
+                assembly.close()
+        self.assemblies.clear()
         for program in reversed(self.prepared):
             program.close()
         self.prepared.clear()

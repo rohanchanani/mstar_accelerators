@@ -1,6 +1,5 @@
 import json
-import sys
-from types import ModuleType
+import pytest
 
 from mstar_accelerators.testing.__main__ import exit_status, main
 
@@ -15,22 +14,32 @@ def test_skip_is_diagnostic_but_requested_coverage_is_explicit():
     assert exit_status({"status": "FAIL", "complete": True}) == 1
 
 
-def test_cli_can_run_an_independent_driver_without_pi_or_model_flags(tmp_path, monkeypatch):
-    calls = []
-    driver = ModuleType("_qualification_test_driver")
+def test_cli_has_no_driver_override(tmp_path):
+    with pytest.raises(SystemExit) as error:
+        main(["--driver", "arbitrary:run", "--report", str(tmp_path / "report.json")])
+    assert error.value.code == 2
 
-    def run(registry, options):
-        calls.append((registry, options))
-        return {"status": "PASS", "complete": True, "counts": {"PASS": 1, "FAIL": 0, "SKIP": 0}}
 
-    driver.run = run
-    monkeypatch.setitem(sys.modules, driver.__name__, driver)
-    config, report = tmp_path / "config.json", tmp_path / "report.json"
-    config.write_text(json.dumps({"workload": "custom"}))
-    assert main(["--registry", "other.module:corpus", "--driver", driver.__name__ + ":run",
-                 "--config", str(config), "--report", str(report), "--require-all-pass"]) == 0
-    assert calls == [("other.module:corpus", {"workload": "custom"})]
-    assert json.loads(report.read_text())["driver"] == driver.__name__ + ":run"
+@pytest.mark.parametrize("key,value", [
+    ("driver", "arbitrary:run"), ("batches", [1]), ("decode_steps", 1),
+    ("comparator", "arbitrary:compare"), ("atol", 100), ("max_trials", 1),
+])
+def test_environment_cannot_override_testing_policy(tmp_path, key, value):
+    config = tmp_path / "config.json"
+    report = tmp_path / "report.json"
+    config.write_text(json.dumps({"environments": [{"kind": "rocm", key: value}]}))
+    with pytest.raises(ValueError, match="central harness"):
+        main(["--config", str(config), "--report", str(report)])
+    assert not report.exists()
+
+
+def test_report_identifies_central_policy(tmp_path):
+    report = tmp_path / "report.json"
+    assert main(["--report", str(report)]) == 0
+    result = json.loads(report.read_text())
+    assert result["qualification_policy"]["qwen_batches"] == [1, 2, 8]
+    assert result["qualification_policy"]["qwen_decode_steps"] == 3
+    assert "driver" not in result
 
 
 def test_default_catalog_can_be_discovered_without_model_assets_or_native_initialization(tmp_path):
@@ -42,7 +51,7 @@ def test_default_catalog_can_be_discovered_without_model_assets_or_native_initia
     assert result["status"] == "SKIP" and not result["complete"]
     assert result["counts"] == {"PASS": 0, "FAIL": 0, "SKIP": len(accelerations)}
     assert [item["name"] for item in result["accelerations"]] == list(accelerations)
-    assert result["native_owner_reserved"] is False
+    assert result["environments"]["0:pi"]["native_owner_reserved"] is False
 
 
 def test_empty_corpus_is_diagnostic_and_strict_coverage_remains_a_harness_choice(tmp_path):
@@ -55,5 +64,5 @@ def test_empty_corpus_is_diagnostic_and_strict_coverage_remains_a_harness_choice
     assert result["status"] == "SKIP" and not result["complete"]
     assert result["counts"] == {"PASS": 0, "FAIL": 0, "SKIP": 0}
     assert result["accelerations"] == []
-    assert result["native_owner_reserved"] is False
+    assert result["environments"]["0:pi"]["native_owner_reserved"] is False
     assert main([*args, "--require-all-pass"]) == 1

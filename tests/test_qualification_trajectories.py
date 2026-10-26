@@ -164,7 +164,17 @@ def tiny(monkeypatch):
     return declaration, consumer, events
 
 
-def test_distinct_registered_programs_share_state_and_reuse_after_backpressure(tiny):
+def test_distinct_registered_programs_share_state_and_reuse_after_backpressure(tiny, monkeypatch):
+    from mstar.engine.engine import Engine
+    original = Engine.exec
+    executions = []
+
+    def execute(engine, batch):
+        outputs = original(engine, batch)
+        executions.append((batch.graph_walk, batch.admit_error is not None))
+        return outputs
+
+    monkeypatch.setattr(Engine, "exec", execute)
     declaration, consumer, events = tiny
     # Deliberately decode first: trajectory evidence does not depend on a
     # previous registration having run or on corpus insertion order.
@@ -188,9 +198,12 @@ def test_distinct_registered_programs_share_state_and_reuse_after_backpressure(t
                      "trajectory.reuses_released_blocks", "trajectory.reassigned.decode.kv_cache",
                      "trajectory.retained_output_after_reassignment",
                      "trajectory.other_request_preserved.cross_kv_cache"}
+    assert sum(not blocked for _, blocked in executions) == sum(event[0] == "run" for event in events)
+    assert ("prefill", True) in executions  # Backpressure also goes through Engine.exec.
     prepared = [event for event in events if event[0] == "prepare"]
     # The two preparations in the joint case receive identical existing owners.
     assert prepared[1][2:] == prepared[2][2:] and prepared[1][1] != prepared[2][1]
+    assert session.engines == [] and session.assemblies == []
     assert session.prepared == [] and session.resource_sets == [] and session.bindings == []
 
 

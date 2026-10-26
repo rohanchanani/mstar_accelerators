@@ -98,10 +98,10 @@ def main(argv=None):
         config = yaml.safe_load(deployment.read_text())
         options = qualification_options(config) | {"deployment": str(deployment)}
         options_path = output / "qualification-config.json"
-        save(options_path, options)
+        save(options_path, {"environments": [{"kind": "rocm", **options}]})
         registry = config["runtime_extension"]["accelerations"]
         run_stage("qualification", [sys.executable, "-m", "mstar_accelerators.testing",
-                  "--registry", registry, "--driver", "mstar_accelerators.testing.qwen3_omni:run",
+                  "--registry", registry,
                   "--config", str(options_path), "--report", str(qualification), "--require-all-pass"],
                   output, record, cwd=ROOT)
         record["qualification"] = check_qualification_report(json.loads(qualification.read_text()))

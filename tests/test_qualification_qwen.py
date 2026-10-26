@@ -23,6 +23,7 @@ from mstar_accelerators.sources import load_accelerations
 from mstar_accelerators.testing.harness import DifferentialConsumer, Status, run_registry
 from mstar_accelerators.testing.models.qwen3_omni import QualificationSession, TalkerCaseAdapter
 from mstar_accelerators.testing.numerics import differential_comparator
+from mstar_accelerators.testing.policy import consumer as central_consumer
 
 
 @pytest.fixture
@@ -67,9 +68,8 @@ def test_actual_program_and_engine_consumed_for_every_talker_branch(tiny_model, 
 
     monkeypatch.setattr(engine_module, "build_bound_resource", host_resource)
     session = QualificationSession()
-    adapter = TalkerCaseAdapter(tiny_model, session=session, device="cpu",
-                               options={"dtype": "float32", "batches": [1, 2, 8], "decode_steps": 3})
-    consumer = DifferentialConsumer({TalkerSubmodule: adapter}, differential_comparator)
+    consumer = central_consumer(tiny_model, session=session, device="cpu",
+                                options={"dtype": "float32"})
     try:
         report = run_registry({"cpu-rehearsal": _cpu_declaration()}, consumer)
         failures = [check for row in report.results for check in row.checks if not check["passed"]]
@@ -119,7 +119,7 @@ def test_production_amd_talker_declaration_is_honest_skip_on_cpu(tiny_model):
     entries = load_accelerations(str(book / "Talker.py"))
     session = QualificationSession()
     adapter = TalkerCaseAdapter(tiny_model, session=session, device="cpu",
-                               options={"dtype": "bfloat16", "batches": [1, 2, 8]})
+                               options={"dtype": "bfloat16"})
     consumer = DifferentialConsumer({TalkerSubmodule: adapter}, differential_comparator)
     report = run_registry(entries, consumer)
     assert report.status is Status.SKIP and not report.complete

@@ -18,7 +18,6 @@ from types import SimpleNamespace
 import torch
 from mstar.engine.execution import InvocationFacts, LogicalInvocation, Support
 from mstar.engine.resources.binding import merge_resource_requests, resolve_bound_specs
-from mstar.engine.resources.runner import StepRunner
 from mstar.engine.resources.sampler.plan import SamplingResult
 from mstar.engine.resources.step import StepContext
 from mstar.engine.resources.spec import ResourceViewConflict
@@ -34,6 +33,7 @@ from mstar_accelerators.binding import invocation_facts, static_facts
 from mstar_accelerators.conditions import Constant
 from mstar_accelerators.registry import Registry
 from mstar_accelerators.testing.harness import CasePlan, Comparison, Unavailable
+from mstar_accelerators.testing.runtime import load_engine, join_placements, execute as engine_execute
 from mstar_accelerators.testing.reference_resources.snapshot import (
     ReferencePlanConsumer,
 )
@@ -44,8 +44,6 @@ from mstar_accelerators.testing.sampling import (
 from mstar_accelerators.testing.whisper import (
     _observe,
     _resource_specs,
-    _run,
-    _runtime_resources,
 )
 
 
@@ -184,12 +182,6 @@ class WhisperCaseAdapter:
             return {key: tensor.detach().clone() for key, tensor in values.items()}
         return _observe(values, self.stream)
 
-    def _reserve(self, capabilities, facts, request_ids):
-        if self.agreement is None:
-            return capabilities.reserve(facts)
-        return self.agreement.reserve(capabilities, facts,
-                                      tuple(f"qualification:{rid}" for rid in request_ids))
-
     def _admit(self, runner, step):
         if self.agreement is None:
             return runner.admit(step)
@@ -202,14 +194,6 @@ class WhisperCaseAdapter:
     def _complete(self):
         if self.agreement is not None:
             self.agreement.complete()
-
-    def _bind(self, assembly, resources):
-        with self._executing():
-            capabilities = assembly.bind(resources)
-            # Retain before the completion rendezvous can report a peer failure.
-            self.session.prepared.append(capabilities)
-            self._complete()
-        return capabilities
 
     def _replica_checks(self, observed):
         if self.agreement is None or self.agreement.group.world_size == 1:
@@ -311,50 +295,31 @@ class WhisperCaseAdapter:
         self.session.bindings.append(binding)
         assembly = Registry({"candidate": acceleration}).assemble(binding, require_coverage=False)
         if encoder:
-            if self.agreement is not None:
-                self.agreement.agree(assembly.execution_names, "qualification implementation set")
-            capabilities = self._bind(assembly, {})
-            logical = NodeInputs(tensor_inputs={"audio_features": self.features})
-            invocation = LogicalInvocation(walk, [0], [logical], ModelInputsFromEngine([0], {}),
-                                           row_walks=(walk,))
-            selected = self._reserve(capabilities, InvocationFacts(walk, 1, row_walks=(walk,)), (0,))
-            if selected is None:
-                raise RuntimeError("the fresh qualification program has no available workspace")
-            try:
-                with self._executing():
-                    result, _ = _run(selected, invocation, self.stream)
-                    self._complete()
-            finally:
-                selected.close()
+            engine = load_engine(binding, assembly, self.session, self.parallel_groups)
+            engine.add_request(0)
+            batch, observations = engine_execute(engine, binding.node_name, walk, 0,
+                                                   {"audio_features": [self.features]})
+            if batch.admit_error is not None:
+                raise RuntimeError(f"encoder admission failed: {batch.admit_error}")
+            result, _, _ = observations[0]
             self.session.retained.extend(result.encoder_states)
             actual = self._observe({"encoder": result.encoder_states[0]})["encoder"]
+            engine.remove_request(0)
             return [Comparison("encoder.rows", len(result.encoder_states), 1, exact=True),
                     Comparison("encoder", actual, states, dtype=torch.float32)]
 
-        prefix_assembly = None
-        requests = assembly.resource_requests
-        if companion is not None:
-            prefix_assembly = assembly if shared_program else Registry({companion[0]: companion[1]}).assemble(
-                replace(binding, graph_walks=("prefill",)), require_coverage=False)
-            requests = merge_resource_requests(prefix_assembly.resource_requests, requests)
-        if self.agreement is not None:
-            self.agreement.agree((assembly.execution_names,
-                                  None if prefix_assembly is None else prefix_assembly.execution_names),
-                                 "qualification implementation set")
-        group = (None if self.parallel_groups is None else
-                 self.parallel_groups.get_joint_group_for_node(binding.node_name))
-        _, resources = _runtime_resources(self.model, self.device, requests,
-                                          specs=binding.resource_specs, session=self.session,
-                                          group=group, agreement=self.agreement)
-        runner = StepRunner(resources)
+        placements = [assembly]
+        if companion is not None and not shared_program:
+            placements.insert(0, Registry({companion[0]: companion[1]}).assemble(
+                replace(binding, graph_walks=("prefill",)), require_coverage=False))
+        engine = load_engine(binding, join_placements(*placements), self.session, self.parallel_groups)
+        resources = engine._resources
+        runner = engine._runner
         reference_state = ReferencePlanConsumer(resources)
         reference_shell = self.model.create_submodule("decoder")
         reference_shell.reference_program = reference
         reference_shell.bind_node_resources(reference_state.resources)
-        capabilities = self._bind(assembly, resources)
-        prefix_capabilities = None
-        if prefix_assembly is not None:
-            prefix_capabilities = capabilities if shared_program else self._bind(prefix_assembly, resources)
+        if companion is not None:
             trajectory["resolved_resources"] = {
                 key: {"layout": "contiguous" if getattr(resources[key].config, "dense", False) else "paged",
                       "block_tokens": resources[key].config.page_size,
@@ -371,6 +336,8 @@ class WhisperCaseAdapter:
             return step, logical
 
         def plan(rid, selected_walk, ids, encoder_states=None):
+            # Only initial CPU-oracle fixture construction uses this helper.
+            # Every candidate invocation is executed by Engine.exec below.
             step, logical = declare(rid, selected_walk, ids, encoder_states)
             if not self._admit(runner, step).ready:
                 raise RuntimeError("the generated single-request case failed resource admission")
@@ -413,7 +380,7 @@ class WhisperCaseAdapter:
                 })
             return logits
 
-        def run_step(rid, selected_walk, ids, selected_capabilities, declaration, *, prefix="",
+        def run_step(rid, selected_walk, ids, declaration, *, prefix="",
                      reuse_reference=False, sample_only=False):
             encoder_states = states if selected_walk == "prefill" else None
             self._check_when(declaration, binding, {}, selected_walk, (ids.numel(),),
@@ -427,21 +394,21 @@ class WhisperCaseAdapter:
                 cross_before = self._observe({
                     CROSS_KV_CACHE: resources[CROSS_KV_CACHE].kv_cache.tensor,
                 })[CROSS_KV_CACHE]
-            facts = InvocationFacts(selected_walk, 1, (ids.numel(),),
-                                    {SAMPLER: resources[SAMPLER].policy_facts([rid])},
-                                    row_walks=(selected_walk,))
-            # As in serving, workspace acquisition precedes admission and the
-            # ordered initialization/materialization that can submit work.
-            selected = self._reserve(selected_capabilities, facts, (rid,))
-            if selected is None:
-                raise RuntimeError("the fresh qualification program has no available workspace")
-            try:
-                step, invocation, reference_engine = plan(rid, selected_walk, ids, encoder_states)
-                with self._executing():
-                    result, _ = _run(selected, invocation, self.stream)
-                    self._complete()
-            finally:
-                selected.close()
+            def observe(result, invocation):
+                return (resources[POS].position(rid, "main"),
+                        resources[SAMPLER]._sampler._step_offset[rid])
+
+            raw = {"text_inputs": [ids]}
+            if encoder_states is not None:
+                raw["encoder_states"] = [encoder_states]
+            batch, observations = engine_execute(engine, binding.node_name, selected_walk, rid,
+                                                   raw, observe=observe)
+            if batch.admit_error is not None:
+                raise RuntimeError(f"qualification admission failed: {batch.admit_error}")
+            result, invocation, primitive_state = observations[0]
+            reference_state.use(invocation.plan_results)
+            reference_engine = ModelInputsFromEngine([rid], {}, reference_state.resources,
+                                                    step=invocation.engine_inputs.step)
             cloned = result.tokens.clone()
             self.session.retained.append(result.tokens)
             expected_logits = (reference_cases[selected_walk][0] if sample_only else reference_logits(
@@ -463,9 +430,9 @@ class WhisperCaseAdapter:
                                  len(prompt) if selected_walk == "decode" else 0, exact=True),
                       Comparison("seed.sampling", before_sampling,
                                  1 if selected_walk == "decode" else 0, exact=True),
-                      Comparison("primitive.position_unchanged", resources[POS].position(rid, "main"),
+                      Comparison("primitive.position_unchanged", primitive_state[0],
                                  before_position, exact=True),
-                      Comparison("primitive.sampling_unchanged", resources[SAMPLER]._sampler._step_offset[rid],
+                      Comparison("primitive.sampling_unchanged", primitive_state[1],
                                  before_sampling, exact=True)]
             checks.extend(self._replica_checks(observed))
             pages = {}
@@ -486,11 +453,7 @@ class WhisperCaseAdapter:
                 checks.append(Comparison("decode.cross_state_unchanged",
                                          observed[CROSS_KV_CACHE][:, columns],
                                          cross_before[:, columns], exact=True))
-            # Reuse the model's existing result-to-resource mapping, exactly as
-            # Engine does, instead of maintaining a second sampler commit path.
-            effects = binding.submodule.execution_result(result, invocation).resource_results
-            runner.accept_results(step, effects)
-            runner.commit(step)
+            # Engine has already adapted the result and committed the declared effects.
             checks.extend((Comparison("commit.position", resources[POS].position(rid, "main"),
                                       before_position + ids.numel(), exact=True),
                            Comparison("commit.sampling", resources[SAMPLER]._sampler._step_offset[rid],
@@ -499,7 +462,7 @@ class WhisperCaseAdapter:
                     result.tokens, expected_tokens if config.temperature == 0 else observed["tokens"], pages)
 
         def ingest(rid, *, seed=None):
-            runner.ingest_request(rid, {SAMPLER: replace(
+            engine.add_request(rid, {SAMPLER: replace(
                 config, _seed=DRAW_SEEDS[rid] if seed is None else seed)})
 
         def seed_decode(rid):
@@ -524,8 +487,8 @@ class WhisperCaseAdapter:
             if walk == "decode":
                 ids = seed_decode(0)
             checks, _, first_sample, _ = run_step(
-                0, walk, ids, capabilities, acceleration, reuse_reference=True)
-            runner.remove_request(0)
+                0, walk, ids, acceleration, reuse_reference=True)
+            engine.remove_request(0)
             if config.temperature > 0:
                 samples = [first_sample]
                 for index, seed in enumerate((*DRAW_SEEDS[1:], DRAW_SEEDS[0]), 1):
@@ -535,10 +498,10 @@ class WhisperCaseAdapter:
                     if walk == "decode":
                         ids = seed_decode(0)
                     more, _, sampled, _ = run_step(
-                        0, walk, ids, capabilities, acceleration,
+                        0, walk, ids, acceleration,
                         prefix=f"sampling.draw{index}.", reuse_reference=True, sample_only=True)
                     checks.extend(more)
-                    runner.remove_request(0)
+                    engine.remove_request(0)
                     if index < len(DRAW_SEEDS):
                         samples.append(sampled)
                     else:
@@ -548,9 +511,9 @@ class WhisperCaseAdapter:
         else:
             def transition(rid, label):
                 prefill_checks, output, expected, pages = run_step(
-                    rid, "prefill", ids, prefix_capabilities, companion[1], prefix=label + "prefill.")
+                    rid, "prefill", ids, companion[1], prefix=label + "prefill.")
                 decode_checks, decoded, expected_decode, pages = run_step(
-                    rid, "decode", output, capabilities, acceleration, prefix=label + "decode.")
+                    rid, "decode", output, acceleration, prefix=label + "decode.")
                 retained = self._observe({"prefill": output})["prefill"]
                 return (prefill_checks + decode_checks + [Comparison(
                     label + "retained_prefill_after_decode", retained, expected, exact=True)],
@@ -575,23 +538,18 @@ class WhisperCaseAdapter:
                 survivor_position = resources[POS].position(1, "main")
                 survivor_sampling = resources[SAMPLER]._sampler._step_offset[1]
                 ingest(2)
-                facts = InvocationFacts("prefill", 1, (len(prompt),),
-                                        {SAMPLER: resources[SAMPLER].policy_facts([2])},
-                                        row_walks=("prefill",))
-                selected = self._reserve(prefix_capabilities, facts, (2,))
-                if selected is None:
-                    raise RuntimeError("backpressure probe could not reserve idle workspace")
-                try:
-                    blocked_step, _ = declare(2, "prefill", ids, states)
-                    blocked = self._admit(runner, blocked_step)
-                finally:
-                    selected.close()
-                checks.append(Comparison("trajectory.third_request_backpressure", blocked.ok, False, exact=True))
+                blocked, observations = engine_execute(
+                    engine, binding.node_name, "prefill", 2,
+                    {"text_inputs": [ids], "encoder_states": [states]})
+                checks.append(Comparison("trajectory.third_request_backpressure",
+                                         blocked.admit_error is None, False, exact=True))
                 checks.append(Comparison("trajectory.backpressure_is_retryable",
-                                         bool(blocked.reason and not blocked.reason.terminal), True, exact=True))
+                                         bool(blocked.admit_error and not blocked.admit_error.terminal), True, exact=True))
+                if observations:
+                    raise RuntimeError("backpressured request unexpectedly executed")
                 # No plan/submission is performed by this failed proposal.
-                runner.remove_request(2)
-                runner.remove_request(0)
+                engine.remove_request(2)
+                engine.remove_request(0)
                 for key, pages in first_pages.items():
                     for layer in resources[key].kv_cache.tensor:
                         for page in pages:
@@ -621,10 +579,10 @@ class WhisperCaseAdapter:
                     Comparison("trajectory.other_request_preserved.sampling",
                                resources[SAMPLER]._sampler._step_offset[1], survivor_sampling, exact=True),
                 ))
-                runner.remove_request(1)
-                runner.remove_request(2)
+                engine.remove_request(1)
+                engine.remove_request(2)
             else:
-                runner.remove_request(0)
+                engine.remove_request(0)
         for key in (KV_CACHE, CROSS_KV_CACHE):
             checks.append(Comparison(("trajectory." if companion else "") + key + ".cleanup_pages",
                                      resources[key]._arena.num_free,

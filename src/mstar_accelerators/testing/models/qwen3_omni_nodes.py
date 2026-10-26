@@ -20,6 +20,7 @@ from mstar_accelerators.binding import static_facts
 from mstar_accelerators.compiler import bind_tensor_result
 from mstar_accelerators.registry import Registry
 from mstar_accelerators.testing.harness import CasePlan, Comparison
+from ..policy import QWEN_BATCHES
 
 
 class NodeCaseAdapter:
@@ -36,7 +37,7 @@ class NodeCaseAdapter:
                               self.device, self.dtype, group, group, {},
                               self.model.get_node_resources(), graph_walks=self.walks)
         static = static_facts(binding)
-        batches = self.options.get('batches', [1, 2, 8]) if self.node == 'Thinker' else [1]
+        batches = QWEN_BATCHES if self.node == 'Thinker' else (1,)
         details = {'finite_domain_only': True, 'timings': [],
                    'reference': 'retained MStar model reference through the ordinary engine',
                    'cases': 'fixed seeded text, media and mixed walks; logical result/state comparison'}

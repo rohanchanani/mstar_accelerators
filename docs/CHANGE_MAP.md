@@ -214,15 +214,16 @@ project. The exact file list is also available in the generated patch inventory.
 
 - `catalog.py`: repository filesystem discovery, separate from deployment subsets.
 - `testing/harness.py`: one registry-consumption loop, PASS/FAIL/SKIP reports,
-  optional executable-reference adapters and an injected differential consumer.
+  optional executable-reference adapters and the platform-selected differential consumer.
 - `testing/solve.py`: bounded, centralized witness search over declared
   alternatives and adapter-supplied realizable domains; unknowns remain diagnosed.
 - `testing/numerics.py`: centralized, versioned component numerical policy,
   exact observations and retained historical pointwise diagnostic.
 - `testing/models/whisper.py`: independent encoder/prefill/decode cases using
   model-owned CPU references, actual registered preparation and M* state plans.
-- `testing/pi.py`, `testing/__main__.py`: configurable qualification driver and
-  CLI, optional prerequisites, existing managed-worker drain/release ownership.
+- `testing/policy.py`, `configuration.py`, `__main__.py`: centralized reference/coverage
+  selection and an environment-only CLI. `testing/pi.py` hosts managed execution;
+  `testing/runtime.py` drives M* Engine and observes the result-adaptation boundary.
   No test verdict enters M* serving or the declaration's three-field identity.
 - `src/mstar_accelerators/testing/whisper.py`: shared input, observation,
   resource and lifetime helpers. The former standalone model qualification

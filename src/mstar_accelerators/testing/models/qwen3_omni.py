@@ -27,6 +27,7 @@ from mstar_accelerators.binding import invocation_facts, static_facts
 from mstar_accelerators.registry import Registry
 from mstar_accelerators.testing.harness import CasePlan, Comparison, Unavailable
 from .qwen3_omni_oracle import TalkerOracle
+from ..policy import QWEN_BATCHES, QWEN_DECODE_STEPS
 
 WALKS = ('talker_prefill', 'talker_last_prefill', 'talker_decode')
 
@@ -37,7 +38,7 @@ def _configuration(options):
         import yaml
         config = yaml.safe_load(Path(options['deployment']).read_text())
     config = dict(config)
-    config['max_concurrent_requests'] = max(options.get('batches', (1, 2, 8)))
+    config['max_concurrent_requests'] = max(QWEN_BATCHES)
     config['runtime_extension'] = {'nodes': ['Talker']}
     config.setdefault('autocast_dtype', options.get('dtype', 'bfloat16'))
     # This finite test uses the deployment budget when supplied; the default
@@ -89,8 +90,8 @@ class TalkerCaseAdapter:
         self.options = dict(options or {})
         self.dtype = getattr(torch, self.options.get('dtype', 'bfloat16'))
         self.config = _configuration(self.options)
-        self.batches = tuple(self.options.get('batches', (1, 2, 8)))
-        self.decode_steps = self.options.get('decode_steps', 3)
+        self.batches = QWEN_BATCHES
+        self.decode_steps = QWEN_DECODE_STEPS
         # Testing may install an explicitly labeled host replay backend before
         # warmup. The production driver never supplies this hook.
         self.prepare_engine = prepare_engine

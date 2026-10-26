@@ -14,8 +14,10 @@ import tempfile
 import torch
 
 from ..sources import load_accelerations, normalize_source
-from .harness import DifferentialConsumer, Result, Status, SuiteReport, run_registry
-from .numerics import DEFAULT, differential_comparator
+from .harness import Result, Status, SuiteReport, run_registry
+from .numerics import DEFAULT
+from .policy import consumer as central_consumer
+from .configuration import environment
 
 
 def _skip(entries, code, reason):
@@ -39,11 +41,9 @@ class _Worker:
 
     def run(self):
         from mstar.model.qwen3_omni.qwen3_omni_model import Qwen3OmniModel
-        from .models.qwen3_omni import adapters
         entries = load_accelerations(self.registry_spec)
         model = Qwen3OmniModel.describe(model_path_hf=self.options['checkpoint'])
-        references = adapters(model, session=self.session, device=self.device, options=self.options)
-        consumer = DifferentialConsumer(references, differential_comparator)
+        consumer = central_consumer(model, session=self.session, device=self.device, options=self.options)
 
         def consume(name, acceleration):
             if self.stopped:
@@ -110,6 +110,7 @@ def _managed(registry_spec, options, report_path):
 
 
 def run(registry_spec, options):
+    options = environment("rocm", options)
     registry_spec = normalize_source(registry_spec)
     entries = load_accelerations(registry_spec)
     device = torch.device(options.get('device', 'cuda:0'))
@@ -122,11 +123,6 @@ def run(registry_spec, options):
         return _skip(entries, 'reference_assets_unavailable', 'an available local Qwen checkpoint is required')
     if not any(Path(checkpoint).glob('*.safetensors')):
         return _skip(entries, 'reference_assets_unavailable', 'checkpoint safetensors are missing')
-    batches = options.get('batches', [1, 2, 8])
-    if not batches or any(type(x) is not int or x < 1 for x in batches) or len(set(batches)) != len(batches):
-        raise ValueError('batches must be distinct positive integers')
-    if options.get('decode_steps', 3) < 3:
-        raise ValueError('decode_steps must cover text, EOS and padding (at least three)')
     if options.get('threads', 4) < 1:
         raise ValueError('threads must be positive')
     with tempfile.TemporaryDirectory(prefix='qwen-qualification-') as directory:

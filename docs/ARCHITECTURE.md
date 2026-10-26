@@ -280,8 +280,9 @@ not a claim that all contemplated consumers already exist.
 
 Qualification belongs to the external optimization platform. Its stable outer
 identity is consumption of the registry with PASS, FAIL or SKIP results; the
-consumer is replaceable and need not prove anything. The seeded differential
-consumer resolves optional executable-reference/case adapters, solves the
+platform-owned policy selects the differential consumer and reference adapters.
+User configuration supplies assets and execution environments, never a driver
+or acceptance/coverage overrides. The differential consumer solves the
 current condition language against actual binding facts and realizable case
 domains, executes the exact registered preparation, and applies centralized
 numerical and exact-effect checks. Missing executable references and unsupported
@@ -294,5 +295,6 @@ policy; the runtime never constructs them merely to deploy an acceleration.
 `Acceleration(reference, when, implementation)` is unchanged. No mandatory test
 annotation, fourth semantic identity, proof or qualification gate is added to
 M*. Different checks, numerical budgets, agent review, type checking and more
-powerful test generation can extend or replace this consumer. See
+powerful test generation can extend this consumer through separate, justified
+platform-policy changes. See
 `QUALIFICATION.md` for the concrete first policies and honest scope limits.

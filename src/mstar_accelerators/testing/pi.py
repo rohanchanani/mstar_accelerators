@@ -16,8 +16,10 @@ from pathlib import Path
 import torch
 
 from ..sources import load_accelerations, normalize_source
-from .harness import DifferentialConsumer, Result, Status, SuiteReport, run_registry
-from .numerics import DEFAULT, differential_comparator
+from .harness import Result, Status, SuiteReport, run_registry
+from .numerics import DEFAULT
+from .policy import consumer as central_consumer
+from .configuration import environment
 
 
 def _registry(spec):
@@ -51,7 +53,6 @@ class _Worker:
         import mstar_pi
         from mstar.model.whisper.whisper_model import WhisperModel
 
-        from .models.whisper import adapters
         from .whisper import audio_inputs
 
         entries = _registry(self.registry_spec)
@@ -60,14 +61,11 @@ class _Worker:
         inputs, identity = audio_inputs(model, self.options["audio"],
                                        language=self.options.get("language", "en"),
                                        task=self.options.get("task", "transcribe"))
-        references = adapters(model, inputs["audio_features"][0],
+        consumer = central_consumer(model, features=inputs["audio_features"][0], options=self.options,
                               session=self.session, device=self.device,
                               corpus=entries,
                               stream=mstar_pi.current_stream(self.device),
-                              language=self.options.get("language", "en"),
-                              task=self.options.get("task", "transcribe"),
                               scope="fresh native execution of registered declaration")
-        consumer = DifferentialConsumer(references, differential_comparator)
 
         def consume(name, acceleration):
             if self.stop_requested:
@@ -136,10 +134,11 @@ def _managed(registry_spec, options, extension, owner, report_path):
 def run(registry_spec: str, options: dict) -> dict:
     """Run this driver's supported corpus, diagnosing unavailable prerequisites.
 
-    Options are trusted test configuration, like deployment configuration.
-    More reference adapters or another backend driver are independent extension
-    points. The core harness does not import this module or know about Pi.
+    Options describe assets and managed execution, never correctness policy.
+    The central coordinator selects this environment host; policy.py selects
+    the references and checks, and M* owns candidate execution.
     """
+    options = environment("pi", options)
     registry_spec = normalize_source(registry_spec)
     entries = _registry(registry_spec)
     checkpoint, audio = options.get("checkpoint"), options.get("audio")

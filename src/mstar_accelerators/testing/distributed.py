@@ -20,8 +20,10 @@ import torch
 
 from ..sources import load_accelerations, normalize_source
 from .environments import combine
-from .harness import DifferentialConsumer, Result, Status, SuiteReport, run_registry
-from .numerics import DEFAULT, differential_comparator
+from .harness import Result, Status, SuiteReport, run_registry
+from .numerics import DEFAULT
+from .policy import consumer as central_consumer
+from .configuration import environment
 
 
 def _write(path, report):
@@ -46,7 +48,6 @@ def _role(rank, registry_spec, options, rendezvous, directory):
     from mstar.model.whisper.whisper_model import WhisperModel
 
     from ..backends.torch.runtime import TorchRuntime
-    from .models.whisper import adapters
     from .whisper import QualificationSession, audio_inputs
 
     path = Path(directory) / f"role-{rank}.json"
@@ -71,12 +72,9 @@ def _role(rank, registry_spec, options, rendezvous, directory):
         inputs, audio = audio_inputs(model, options["audio"],
                                     language=options.get("language", "en"),
                                     task=options.get("task", "transcribe"))
-        references = adapters(model, inputs["audio_features"][0], session=session,
+        consumer = central_consumer(model, features=inputs["audio_features"][0], options=options, session=session,
                               device="cpu", corpus=entries, parallel_groups=groups,
-                              language=options.get("language", "en"),
-                              task=options.get("task", "transcribe"),
                               scope="registered Torch execution in actual CPU role processes")
-        consumer = DifferentialConsumer(references, differential_comparator)
 
         def consume(name, acceleration):
             nonlocal active
@@ -114,6 +112,7 @@ def _role(rank, registry_spec, options, rendezvous, directory):
 
 
 def run(registry_spec, options):
+    options = environment("cpu", options)
     registry_spec = normalize_source(registry_spec)
     entries = load_accelerations(registry_spec)
     checkpoint, audio = options.get("checkpoint"), options.get("audio")

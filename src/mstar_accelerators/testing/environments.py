@@ -12,6 +12,8 @@ from mstar.engine.execution import Support
 from ..sources import load_accelerations, normalize_source
 from .harness import Result, Status, run_registry
 from .numerics import DEFAULT
+from .configuration import environments as configured_environments
+from .policy import identity
 
 
 def inactive(result):
@@ -50,19 +52,16 @@ def combine(name, observations, *, scope, irrelevant=()):
 def run(registry_spec, options):
     from . import distributed, pi, qwen3_omni
 
+    environments = configured_environments(options)
     registry_spec = normalize_source(registry_spec)
     entries = load_accelerations(registry_spec)
-    environments = options.get("environments", [{"kind": "pi"}])
-    shared = {key: value for key, value in options.items() if key != "environments"}
     reports = {}
     targets = {}
-    for index, environment in enumerate(environments):
-        kind = environment["kind"]
+    for index, (kind, config) in enumerate(environments):
         driver, device = {"pi": (pi.run, "mstar_pi"),
                           "cpu": (distributed.run, "cpu"),
                           "rocm": (qwen3_omni.run, "cuda")}[kind]
         label = f"{index}:{kind}"
-        config = {**shared, **{key: value for key, value in environment.items() if key != "kind"}}
         reports[label] = driver(registry_spec, config)
         targets[label] = {"device_type": device}
         names = [row["name"] for row in reports[label]["accelerations"]]
@@ -79,7 +78,7 @@ def run(registry_spec, options):
                                    if acceleration.when.evaluate(facts) is Support.NO})
 
     report = run_registry(entries, consume).to_dict()
-    report.update(policy=DEFAULT.name, environments={
+    report.update(policy=DEFAULT.name, qualification_policy=identity(), environments={
         label: {key: value for key, value in result.items() if key != "accelerations"}
         for label, result in reports.items()})
     # Startup failures can happen before any registration is active.
