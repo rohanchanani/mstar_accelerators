@@ -527,8 +527,7 @@ class ThinkerProgram(nn.Module):
             if info is not None and not info.step_metadata.get("audio_output", True):
                 continue
 
-            # TensorForwardRunner.collect_outputs takes the owned copy before replay reuse.
-            ts_slice = packed_states[slice_start:slice_end]
+            ts_slice = packed_states[slice_start:slice_end].clone()
             rid_out: dict[str, list[torch.Tensor]] = {
                 "thinker_states": [ts_slice],
             }
