@@ -15,7 +15,7 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a C
 
 @pytest.mark.parametrize("bs,seq_len,cache_pos", [(1, 1, 0), (5, 1, 7), (32, 1, 15), (3, 2, 4)])
 def test_cp_prologue_matches_the_unfused_ops(bs, seq_len, cache_pos):
-    from mstar_accelerators.implementations.qwen3_omni.amd_b.cp_kernels import cp_qk_norm_rope_kv_write
+    from mstar_accelerators.implementations.qwen3_omni.amd.cp_kernels import cp_qk_norm_rope_kv_write
     from mstar.utils.attention import fused_qk_norm_rope
 
     torch.manual_seed(0)
@@ -86,7 +86,7 @@ def test_router_compiles_with_the_fused_topk():
 
 @pytest.mark.parametrize("bs", [1, 8, 32])
 def test_cp_embed_accumulate_matches_the_unfused_ops(bs):
-    from mstar_accelerators.implementations.qwen3_omni.amd_b.cp_kernels import cp_embed_accumulate
+    from mstar_accelerators.implementations.qwen3_omni.amd.cp_kernels import cp_embed_accumulate
 
     torch.manual_seed(2)
     weight = torch.randn(2048, 1024, device="cuda", dtype=torch.bfloat16)

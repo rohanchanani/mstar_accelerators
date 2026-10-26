@@ -56,7 +56,7 @@ def test_asset_manifest_is_complete_for_the_pinned_checkpoint():
 
 def test_rendered_deployment_preserves_policy_and_selects_only_talker(tmp_path):
     tool = load_tool("prepare_assets")
-    template = ROOT / "deployments/qwen3_omni_amd_a.yaml"
+    template = ROOT / "deployments/qwen3_omni_amd.yaml"
     checkpoint = tmp_path / "model with spaces"
     destination = tmp_path / "rendered.yaml"
     source = yaml.safe_load(template.read_text())
@@ -64,7 +64,7 @@ def test_rendered_deployment_preserves_policy_and_selects_only_talker(tmp_path):
     assert config["runtime_extension"]["nodes"] == ["Talker"]
     assert config["runtime_extension"]["factory"] == \
         "mstar_accelerators.backends.torch.device_runtime:DeviceTorchRuntime"
-    assert Path(config["runtime_extension"]["accelerations"]) == ROOT / "accelerations/qwen3_omni/amd_a"
+    assert Path(config["runtime_extension"]["accelerations"]) == ROOT / "accelerations/qwen3_omni/amd"
     assert Path(config["runtime_extension"]["accelerations"]).is_dir()
     assert config["model_kwargs"]["model_path_hf"] == str(checkpoint.resolve())
     assert config["resources"] == source["resources"]

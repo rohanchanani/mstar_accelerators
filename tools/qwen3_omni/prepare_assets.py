@@ -49,7 +49,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--cache-dir", type=Path, help="Hugging Face cache, reusing existing shards")
     parser.add_argument("--checkpoint", type=Path, help="verify an existing local checkpoint instead")
     parser.add_argument("--config", type=Path, required=True)
-    parser.add_argument("--template", type=Path, default=ROOT / "deployments/qwen3_omni_amd_a.yaml")
+    parser.add_argument("--template", type=Path, default=ROOT / "deployments/qwen3_omni_amd.yaml")
     parser.add_argument("--offline", action="store_true")
     args = parser.parse_args(argv)
     manifest = json.loads(MANIFEST.read_text())

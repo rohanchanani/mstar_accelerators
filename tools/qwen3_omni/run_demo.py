@@ -171,7 +171,7 @@ def check_execution_receipts(log: str) -> list[str]:
                 and fields.get("runner") == "tensor_forward" and fields.get("implementation")
                 and fields.get("rows", "0").isdecimal() and int(fields.get("rows", "0")) > 0):
             return receipts
-    raise RuntimeError("no captured tensor-forward Talker decode receipt; foundation A is incomplete")
+    raise RuntimeError("no captured tensor-forward Talker decode receipt; AMD deployment is incomplete")
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -198,7 +198,7 @@ def main(argv: list[str] | None = None) -> None:
     command = [sys.executable, "-m", "mstar.cli.main", "serve", "qwen3_omni",
                "--config", str(deployment), "--gpus", args.gpu, "--host", "127.0.0.1",
                "--port", str(args.port), "--tensor-comm-protocol", "SHM"]
-    record = {"status": "FAIL", "scope": "foundation A service bring-up and baseline sample",
+    record = {"status": "FAIL", "scope": "AMD deployment service bring-up and baseline sample",
               "mstar": source_identity(args.mstar_root), "accelerators": source_identity(ROOT),
               "command": command, "deployment": config,
               "deployment_sha256": hashlib.sha256(deployment.read_bytes()).hexdigest()}

@@ -10,7 +10,7 @@ from mstar.model.qwen3_omni.logical import TalkerSubmodule
 from mstar.model.qwen3_omni.results import TalkerResult
 from mstar_accelerators import Acceleration, Eq, Implementation, Or, Range, TensorForwardExecution, When
 from mstar_accelerators.backends.torch.tensor_forward import tensor_resource_requests
-from mstar_accelerators.implementations.qwen3_omni.amd_c_norm2.preparation import prepare_program
+from mstar_accelerators.implementations.qwen3_omni.amd.preparation import prepare_program
 from typing import Literal
 import torch
 

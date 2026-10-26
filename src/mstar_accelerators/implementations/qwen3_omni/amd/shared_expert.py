@@ -15,7 +15,7 @@ from mstar.model.components.distributed.linear import (
 )
 from mstar.model.components.moe import _dispatch
 
-from ..amd_a.router_consistency import PrefillConsistentMoe
+from .router_consistency import PrefillConsistentMoe
 from .shared_prefill import _finish_mfma, _prepare_mfma
 
 

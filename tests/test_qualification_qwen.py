@@ -18,7 +18,7 @@ from mstar.model.qwen3_omni.logical import TalkerSubmodule
 from mstar.model.qwen3_omni.qwen3_omni_model import Qwen3OmniModel
 from mstar_accelerators import Acceleration, Eq, Implementation, Or, Range, TensorForwardExecution, When
 from mstar_accelerators.backends.torch.tensor_forward import tensor_resource_requests
-from mstar_accelerators.implementations.qwen3_omni.amd_a.preparation import prepare_program
+from mstar_accelerators.implementations.qwen3_omni.amd.preparation import prepare_program
 from mstar_accelerators.sources import load_accelerations
 from mstar_accelerators.testing.harness import DifferentialConsumer, Status, run_registry
 from mstar_accelerators.testing.models.qwen3_omni import QualificationSession, TalkerCaseAdapter
@@ -115,7 +115,7 @@ def test_actual_program_and_engine_consumed_for_every_talker_branch(tiny_model, 
 
 
 def test_production_amd_declaration_is_honest_skip_on_cpu(tiny_model):
-    book = Path(__file__).parents[1] / "accelerations/qwen3_omni/amd_a"
+    book = Path(__file__).parents[1] / "accelerations/qwen3_omni/amd"
     entries = load_accelerations(str(book))
     session = QualificationSession()
     adapter = TalkerCaseAdapter(tiny_model, session=session, device="cpu",

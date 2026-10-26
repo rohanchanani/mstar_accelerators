@@ -20,4 +20,4 @@ node_groups:
 runtime_extension:
   factory: mstar_accelerators.backends.torch.device_runtime:DeviceTorchRuntime
   nodes: [Talker]
-  accelerations: accelerations/qwen3_omni/amd_a
+  accelerations: accelerations/qwen3_omni/amd

@@ -3,7 +3,7 @@
 `whisper/pi_v3d` contains four returned books: the encoder, greedy paged prefill,
 greedy contiguous decode, and combined positive-temperature decoder.
 `whisper/cpu_tp2` contains an encoder and two combined decoder alternatives with
-different FFN collective realizations. `qwen3_omni/amd_a` contains the
+different FFN collective realizations. `qwen3_omni/amd` contains the
 external Talker book for the AMD A starting point. Each result retains its own
 target evidence; adding a file or discovering it is not qualification.
 

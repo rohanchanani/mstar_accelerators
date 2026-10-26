@@ -353,7 +353,7 @@ serves as a physical-program factory for the acceleration.
 - `backends/torch/tensor_forward.py`: optional typed physical resource choices
   for the runtime's numerical methods and device plans. These do not create a
   second resource allocator or state owner.
-- `implementations/qwen3_omni/amd_a/`: external Talker numerical program, weights,
+- `implementations/qwen3_omni/amd/`: external Talker numerical program, weights,
   physical packing and capture recipes, with source provenance. The filled Talker
   book selects that program and its explicit compile/capture policy.
 - `authoring.py`, `tests/test_authoring.py`: real CLI selection of callable or

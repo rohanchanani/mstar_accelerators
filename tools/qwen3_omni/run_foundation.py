@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Execute AMD A target gates and the real demo from an installed environment."""
+"""Execute AMD target gates and the real demo from an installed environment."""
 from __future__ import annotations
 
 import argparse
@@ -54,7 +54,7 @@ def check_qualification_report(report):
 
 def qualification_options(deployment):
     if deployment.get("runtime_extension", {}).get("nodes") != ["Talker"]:
-        raise ValueError("the A campaign requires the external Talker deployment")
+        raise ValueError("the AMD campaign requires the external Talker deployment")
     return {"checkpoint": deployment["model_kwargs"]["model_path_hf"],
             "device": "cuda:0", "threads": 4}
 
@@ -74,12 +74,12 @@ def main(argv=None):
     output = (args.output or work / "runs" / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")).resolve()
     output.mkdir(parents=True, exist_ok=False)
     mstar = args.mstar_root.resolve()
-    record = {"status": "FAIL", "scope": "AMD A target preflight, central qualification and real service baseline",
+    record = {"status": "FAIL", "scope": "AMD target preflight, central qualification and real service baseline",
               "python": sys.executable, "mstar_root": str(mstar), "accelerators_root": str(ROOT),
               "output": str(output), "stages": []}
     preflight = output / "preflight.json"
     qualification = output / "qualification.json"
-    deployment = output / "qwen3_omni_a.yaml"
+    deployment = output / "qwen3_omni_amd.yaml"
     try:
         # Refuse an unavailable target before downloading or hashing the large checkpoint.
         run_stage("preflight", [sys.executable, str(TOOLS / "preflight.py"),

@@ -34,8 +34,15 @@ from mstar.model.qwen3_omni.config import (
 )
 from torch import nn
 
+from .router_consistency import ConsistentBF16Router
 from .attention import Qwen3OmniAttention
-from .router_consistency import ConsistentBF16Router, PrefillConsistentMoe
+from .attention_projection import attention_projection_norm
+from .cp_kernels import cp_qk_norm_rope_kv_write
+from .finish_norm import predictor_mlp_next_norm
+from .region_mlp import PredictorRegionMLP
+from .rounded_norm import rounded_add_norm
+from .shared_expert import SharedRegionMoe
+from .short_attention import short_decode_attn_nhd
 
 
 def fused_qk_norm_rope(*args, **kwargs):
@@ -106,7 +113,7 @@ class Qwen3OmniTalkerLayer(nn.Module):
         )
         self.post_attention_layernorm = RMSNorm(hidden_size, rms_norm_eps)
 
-        self.mlp = PrefillConsistentMoe(
+        self.mlp = SharedRegionMoe(
             router=ConsistentBF16Router(
                 hidden_size=hidden_size,
                 num_experts=config.num_experts,
@@ -283,6 +290,8 @@ class Qwen3OmniTalkerModel(nn.Module):
 
 
 class Qwen3OmniCodePredictorLayer(nn.Module):
+    rounded_norm_enabled = True
+
     """Single Code Predictor decoder layer (attention + dense MLP, no MoE).
 
     Uses QK-norm, standard 1D RoPE (no 3D MRoPE).
@@ -303,7 +312,7 @@ class Qwen3OmniCodePredictorLayer(nn.Module):
             use_mrope=False,
         )
         self.post_attention_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps)
-        self.mlp = ParallelGatedMLP(
+        self.mlp = PredictorRegionMLP(
             hidden_size=hidden_size, intermediate_size=intermediate_size,
             activation="silu",
         )
@@ -314,10 +323,15 @@ class Qwen3OmniCodePredictorLayer(nn.Module):
         hidden_states = self.self_attn(
             hidden_states=hidden_states,
         )
-        hidden_states = residual + hidden_states
-
-        residual = hidden_states
-        hidden_states = self.post_attention_layernorm(hidden_states)
+        if self.rounded_norm_enabled:
+            hidden_states, residual = rounded_add_norm(
+                residual, hidden_states, self.post_attention_layernorm.weight,
+                self.post_attention_layernorm.variance_epsilon,
+            )
+        else:
+            hidden_states = residual + hidden_states
+            residual = hidden_states
+            hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
         return hidden_states
@@ -374,6 +388,7 @@ class Qwen3OmniCodePredictorInnerModel(nn.Module):
 
 
 class Qwen3OmniCodePredictor(nn.Module):
+    finish_norm_enabled = True
     """Code Predictor: lightweight transformer for residual codebook layers.
 
     HF weight layout (published checkpoint has 15 residual heads)::
@@ -395,6 +410,8 @@ class Qwen3OmniCodePredictor(nn.Module):
     def __init__(self, config: Qwen3OmniModelConfig):
         super().__init__()
         cp = config.code_predictor
+        self.short_attention_enabled = True
+        self.attention_projection_fusion_enabled = True
 
         self.model = Qwen3OmniCodePredictorInnerModel(config)
 
@@ -509,7 +526,7 @@ class Qwen3OmniCodePredictor(nn.Module):
             for applying the per-codebook LM head.
         """
         hidden_states = inputs_embeds
-        bs, seq_len, hidden_size = hidden_states.shape
+        bs, seq_len, _hidden_size = hidden_states.shape
 
         first_attn = self.model.layers[0].self_attn
         n_kv_heads = first_attn.num_kv_heads
@@ -520,59 +537,83 @@ class Qwen3OmniCodePredictor(nn.Module):
         # predictor arithmetic uses the loaded parameter dtype.
         flat_pos = position_ids.reshape(-1)
 
+        residual = hidden_states
+        fuse_residual_norm = self.model.layers[0].rounded_norm_enabled
+        fuse_mlp_finish = (
+            self.finish_norm_enabled and fuse_residual_norm and bs * seq_len in (4, 8)
+            and all(layer.mlp.region_supported(inputs_embeds) for layer in self.model.layers)
+        )
         for layer_idx, layer in enumerate(self.model.layers):
             attn = layer.self_attn
-            residual = hidden_states
+            if fuse_mlp_finish and layer_idx > 0:
+                # The preceding MLP already produced this layer's normalized input.
+                pass
+            elif fuse_residual_norm and layer_idx > 0:
+                # Consume the previous MLP's delta while preserving its BF16 sum.
+                hidden_states, residual = rounded_add_norm(
+                    residual, hidden_states, layer.input_layernorm.weight,
+                    layer.input_layernorm.variance_epsilon,
+                )
+            else:
+                residual = hidden_states
+                hidden_states = layer.input_layernorm(hidden_states)
 
-            hidden_states = layer.input_layernorm(hidden_states)
-
-            total_tokens = bs * seq_len
             qkv = F.linear(hidden_states, layer.self_attn.qkv_proj.weight)
             q_size = n_q_heads * head_dim
-            kv_size = n_kv_heads * head_dim
-            q, k, v = qkv.split((q_size, kv_size, kv_size), dim=-1)
-            q = q.view(total_tokens, n_q_heads, head_dim)
-            k = k.view(total_tokens, n_kv_heads, head_dim)
-
-            rope_theta = float(attn.rope_theta)
-            q = fused_qk_norm_rope(
-                q, attn.q_norm.weight,
-                pos=flat_pos,
-                eps=attn.q_norm.variance_epsilon,
-                rope_theta=rope_theta
+            cp_qk_norm_rope_kv_write(
+                qkv.view(bs * seq_len, -1), attn.q_norm.weight, attn.k_norm.weight,
+                flat_pos, kv_cache[layer_idx], cache_pos, seq_len,
+                attn.q_norm.variance_epsilon, attn.k_norm.variance_epsilon,
+                float(attn.rope_theta), n_q_heads, n_kv_heads, head_dim,
             )
-            k = fused_qk_norm_rope(
-                k, attn.k_norm.weight,
-                pos=flat_pos,
-                eps=attn.k_norm.variance_epsilon,
-                rope_theta=rope_theta
-            )
-
-            q = q.view(bs, seq_len, n_q_heads, head_dim)
-            k = k.view(bs, seq_len, n_kv_heads, head_dim)
-            v = v.view(bs, seq_len, n_kv_heads, head_dim)
-
-            # Append K, V into dense cache at cache_pos .. cache_pos+seq_len.
-            kv_cache[layer_idx, :, 0, cache_pos:cache_pos + seq_len] = k
-            kv_cache[layer_idx, :, 1, cache_pos:cache_pos + seq_len] = v
+            q = qkv[..., :q_size].view(bs, seq_len, n_q_heads, head_dim)
 
             # Read K, V for all positions up to and including the new tokens.
             valid_len = cache_pos + seq_len
             k_full = kv_cache[layer_idx, :, 0]
             v_full = kv_cache[layer_idx, :, 1]
 
-            attn_out = decode_attn_nhd(
-                q, k_full, v_full, valid_len
+            if (self.attention_projection_fusion_enabled and self.short_attention_enabled
+                    and bs in (1, 2) and seq_len == 1 and valid_len <= 16
+                    and layer.rounded_norm_enabled):
+                hidden_states, residual = attention_projection_norm(
+                    q, k_full, v_full, attn.o_proj.weight, residual,
+                    layer.post_attention_layernorm.weight, valid_len,
+                    layer.post_attention_layernorm.variance_epsilon,
+                )
+            else:
+                attention = short_decode_attn_nhd if self.short_attention_enabled else decode_attn_nhd
+                attn_out = attention(q, k_full, v_full, valid_len)
+                attn_out = attn_out.reshape(bs, seq_len, -1)
+                # Preserve B's BF16 add boundary before normalization.
+                if layer.rounded_norm_enabled:
+                    hidden_states, residual = rounded_add_norm(
+                        residual, attn.o_proj(attn_out), layer.post_attention_layernorm.weight,
+                        layer.post_attention_layernorm.variance_epsilon,
+                    )
+                else:
+                    hidden_states = residual + attn.o_proj(attn_out)
+                    residual = hidden_states
+                    hidden_states = layer.post_attention_layernorm(hidden_states)
+            if fuse_mlp_finish:
+                next_norm = self.model.layers[layer_idx + 1].input_layernorm if layer_idx + 1 < len(self.model.layers) else self.model.norm
+                hidden_states, residual = predictor_mlp_next_norm(
+                    hidden_states, layer.mlp.gate_up_proj.weight, layer.mlp.down_proj.weight,
+                    residual, next_norm.weight, next_norm.variance_epsilon,
+                )
+            else:
+                hidden_states = layer.mlp(hidden_states)
+            if not fuse_residual_norm:
+                hidden_states = residual + hidden_states
+
+        # The last MLP's sum feeds the model norm rather than another layer.
+        if fuse_mlp_finish:
+            return hidden_states
+        if fuse_residual_norm:
+            hidden_states, _ = rounded_add_norm(
+                residual, hidden_states, self.model.norm.weight,
+                self.model.norm.variance_epsilon,
             )
-            attn_out = attn_out.reshape(bs, seq_len, -1)
-            hidden_states = residual + attn.o_proj(attn_out)
-
-            # Post-attention RMSNorm + dense MLP.
-            residual = hidden_states
-            hidden_states = layer.post_attention_layernorm(hidden_states)
-            hidden_states = layer.mlp(hidden_states)
-            hidden_states = residual + hidden_states
-
-        # Final norm.
-        hidden_states = self.model.norm(hidden_states)
+        else:
+            hidden_states = self.model.norm(hidden_states)
         return hidden_states

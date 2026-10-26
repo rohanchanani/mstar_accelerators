@@ -14,14 +14,14 @@ logical node, selects a supported execution, admits its resources, runs the
 physical program on the worker's Torch stream and commits the model's declared
 effects.
 
-## Run AMD A from the paired source package
+## Run Qwen3-Omni on AMD
 
 The package contains sibling `mstar/` and `mstar_accelerators/` source trees.
 From the extracted package root on the configured gfx942 AMD host:
 
 ```bash
 cd mstar_accelerators
-bash tools/qwen3_omni/run_a.sh ../mstar /absolute/path/to/amd-work /opt/rocm-7.2.0
+bash tools/qwen3_omni/run_amd.sh ../mstar /absolute/path/to/amd-work /opt/rocm-7.2.0
 ```
 
 This installs the pinned environment, runs target preflight, verifies and renders
