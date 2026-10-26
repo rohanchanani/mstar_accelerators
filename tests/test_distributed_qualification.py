@@ -26,12 +26,14 @@ from mstar_accelerators.backends.torch import TorchProgram, prepare_torch_progra
 from mstar_accelerators.backends.weights import TensorShard, prepare_weights
 from mstar_accelerators.conditions import AllRows, Or
 from mstar_accelerators.implementations.whisper.torch import WhisperTorch
-from mstar_accelerators.testing import distributed
+from mstar_accelerators.testing import hosting as distributed
+from mstar_accelerators.testing.planning import Job
+from mstar_accelerators.backends.discovery import Environment
 from mstar_accelerators.testing.environments import combine
 from mstar_accelerators.testing.harness import Result, Status
 
 
-_REAL_ROLE = distributed._role
+_REAL_ROLE = distributed._managed
 _FFN_STATS = {}
 
 
@@ -77,19 +79,23 @@ def _synthetic_audio(model, path, **_kwargs):
         "scope": "synthetic test features", "path": str(path)}
 
 
+class _SyntheticCase:
+    key = 'synthetic-whisper'
+
+    def describe(self, checkpoint):
+        return _SyntheticModel(checkpoint)
+
+
 def _synthetic_role(*args):
-    from mstar.model.whisper import whisper_model
     from mstar_accelerators.testing import whisper
     from mstar_accelerators.testing.models import whisper as cases
 
-    whisper_model.WhisperModel = _SyntheticModel
     whisper.audio_inputs = _synthetic_audio
     cases._resource_specs = _small_specs
     _REAL_ROLE(*args)
-    rank, _, _, _, directory = args
-    path = Path(directory) / f"role-{rank}.json"
+    path = Path(args[-1])
     report = json.loads(path.read_text())
-    report["test_ffn"] = _FFN_STATS
+    report['test_ffn'] = _FFN_STATS
     path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
 
 
@@ -159,23 +165,29 @@ def test_central_consumer_runs_both_real_roles_and_collective_protocols(tmp_path
     checkpoint.mkdir()
     audio = tmp_path / "synthetic-input"
     audio.write_bytes(b"test-only synthetic input identity\n")
-    monkeypatch.setattr(distributed, "_role", _synthetic_role)
-    report = distributed.run(source, {"checkpoint": str(checkpoint), "audio": str(audio),
-        "threads": 1, "deadline_seconds": 90, "collective_timeout_seconds": 20})
+    monkeypatch.setattr(distributed, "_managed", _synthetic_role)
+    env = Environment('cpu', 'cpu', 'cpu', 'cpu', 2, 'gloo',
+        'mstar_accelerators.backends.torch.runtime:TorchRuntime')
+    # The automatic planner creates separate supported TP1 and TP2 placements;
+    # neither backend nor host contains encoder/decoder-specific placement code.
+    job = Job(_SyntheticCase(), env, 2, ('decoder',),
+              ('decoder_all_reduce', 'decoder_gather'), ())
+    report = distributed.execute(str(source), job, str(checkpoint), {'audio': str(audio)})
+    encoder = distributed.execute(str(source), Job(_SyntheticCase(), env, 1,
+        ('audio_encoder',), ('audio_encoder',), ()), str(checkpoint), {'audio': str(audio)})
+    assert encoder['counts'] == {'PASS': 1, 'FAIL': 0, 'SKIP': 0}
     output = Path(os.environ.get("MSTAR_P3_TEST_REPORT_ROOT", tmp_path))
     output.mkdir(parents=True, exist_ok=True)
     (output / "cpu-consumer.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
-    assert report["counts"] == {"PASS": 3, "FAIL": 0, "SKIP": 1}, report
-    assert report["exit_codes"] == [0, 0]
+    assert report["counts"] == {"PASS": 2, "FAIL": 0, "SKIP": 0}, report
     assert len({role["pid"] for role in report["roles"].values()}) == 2
     for role in report["roles"].values():
-        assert role["groups_released"] and role["runtime_released"]
+        assert role["runtime_released"]
         for protocol in ("all_reduce", "gather"):
             stats = role["test_ffn"][protocol]
             assert stats["calls"] == stats["nonzero_contributions"] > 0
             assert stats["local_ffn_width"] == 10
     rows = {row["name"]: row for row in report["accelerations"]}
-    assert rows["audio_encoder"]["details"]["nonparticipating"] == ["1"]
     for name in ("decoder_all_reduce", "decoder_gather"):
         row = rows[name]
         assert not row["details"]["nonparticipating"]

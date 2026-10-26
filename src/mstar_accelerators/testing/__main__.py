@@ -19,13 +19,11 @@ def exit_status(report: dict, *, require_all_pass: bool = False) -> int:
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--registry", default="mstar_accelerators.catalog:accelerations")
-    parser.add_argument("--config", help="environment/assets JSON; omitted means discovery without model assets")
     parser.add_argument("--report", required=True)
     parser.add_argument("--require-all-pass", action="store_true",
                         help="make missing coverage nonzero for this requested gate")
     args = parser.parse_args(argv)
-    options = {} if args.config is None else json.loads(Path(args.config).read_text())
-    report = run(args.registry, options)
+    report = run(args.registry)
     report.update(registry=args.registry)
     path = Path(args.report)
     path.parent.mkdir(parents=True, exist_ok=True)

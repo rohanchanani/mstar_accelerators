@@ -7,7 +7,7 @@ import pytest
 import torch
 from mstar import runtime_extensions
 
-from mstar_accelerators.testing import pi
+from mstar_accelerators.testing import hosting as pi
 from mstar_accelerators.testing.harness import Result, Status, SuiteReport
 
 
@@ -22,7 +22,7 @@ class Owner:
 @pytest.fixture
 def entries(monkeypatch):
     values = {"first": object(), "second": object(), "third": object()}
-    monkeypatch.setattr(pi, "_registry", lambda spec: values)
+    monkeypatch.setattr(pi, "_entries", lambda source, job: values)
     return values
 
 
@@ -36,6 +36,7 @@ def test_publish_completed_verdict_only_after_managed_release(entries, tmp_path,
         assert received_owner is owner
         assert not path.exists()
         record = kwargs["record"]
+        record["worker_closed"] = True
         results = [Result(name, verdict, "mock completed numerical evidence") for name in entries]
         record["results"].extend(results)
         record["report"] = SuiteReport(tuple(results)).to_dict()
@@ -44,13 +45,13 @@ def test_publish_completed_verdict_only_after_managed_release(entries, tmp_path,
         events.append("native ownership released")
 
     monkeypatch.setattr(runtime_extensions, "run_managed_worker", managed)
-    pi._managed("test:registry", {}, object(), owner, path)
+    pi._managed("test:registry", SimpleNamespace(entries=tuple(entries), environment=SimpleNamespace(runtime=lambda source: object(), prepare_process=lambda: None, device="cpu")), "/unused", {}, 0, "unused", owner, path)
     events.append("report observed")
     report = json.loads(path.read_text())
     assert events == ["execution settled", "native ownership released", "report observed"]
     assert report["status"] == verdict.value
     assert report["complete"]
-    assert report["native_owner_reserved"] and report["native_owner_released"]
+    assert report["runtime_released"]
     assert [item["name"] for item in report["accelerations"]] == list(entries)
 
 
@@ -60,6 +61,7 @@ def test_execution_failure_keeps_completed_results_and_diagnoses_aborted_entries
 
     def managed(worker_class, kwargs, extension, received_owner):
         record = kwargs["record"]
+        record["worker_closed"] = True
         record["results"].append(Result("first", Status.PASS, "completed before error"))
         record["active"] = "second"
         assert not path.exists()
@@ -67,15 +69,15 @@ def test_execution_failure_keeps_completed_results_and_diagnoses_aborted_entries
         raise RuntimeError("execution failed; managed drain and release completed")
 
     monkeypatch.setattr(runtime_extensions, "run_managed_worker", managed)
-    pi._managed("test:registry", {}, object(), owner, path)
+    pi._managed("test:registry", SimpleNamespace(entries=tuple(entries), environment=SimpleNamespace(runtime=lambda source: object(), prepare_process=lambda: None, device="cpu")), "/unused", {}, 0, "unused", owner, path)
     report = json.loads(path.read_text())
     assert report["status"] == "FAIL" and not report["complete"]
     assert report["counts"] == {"PASS": 1, "FAIL": 1, "SKIP": 1}
     assert [(item["name"], item["status"]) for item in report["accelerations"]] == [
         ("first", "PASS"), ("second", "FAIL"), ("third", "SKIP"),
     ]
-    assert "managed drain" in report["driver_error"]
-    assert report["native_owner_released"]
+    assert "managed drain" in report["worker_error"]
+    assert report["runtime_released"]
 
 
 def test_early_driver_failure_preserves_registry_inventory(entries, tmp_path, monkeypatch):
@@ -83,17 +85,18 @@ def test_early_driver_failure_preserves_registry_inventory(entries, tmp_path, mo
     path = tmp_path / "report.json"
 
     def managed(worker_class, kwargs, extension, received_owner):
+        kwargs["record"]["worker_closed"] = True
         # No declaration or worker.run() entered; all names must already exist.
         assert kwargs["record"]["names"] == tuple(entries)
         owner.state = "released"
         raise RuntimeError("reference construction bug")
 
     monkeypatch.setattr(runtime_extensions, "run_managed_worker", managed)
-    pi._managed("test:registry", {}, object(), owner, path)
+    pi._managed("test:registry", SimpleNamespace(entries=tuple(entries), environment=SimpleNamespace(runtime=lambda source: object(), prepare_process=lambda: None, device="cpu")), "/unused", {}, 0, "unused", owner, path)
     report = json.loads(path.read_text())
     assert report["status"] == "FAIL" and not report["complete"]
     assert report["counts"] == {"PASS": 0, "FAIL": 0, "SKIP": 3}
-    assert "reference construction bug" in report["driver_error"]
+    assert "reference construction bug" in report["worker_error"]
     assert [item["name"] for item in report["accelerations"]] == list(entries)
 
 
@@ -107,7 +110,7 @@ def test_uncertain_owner_exception_propagates_without_publishing_release(entries
 
     monkeypatch.setattr(runtime_extensions, "run_managed_worker", managed)
     with pytest.raises(RuntimeError, match="uncertain"):
-        pi._managed("test:registry", {}, object(), owner, path)
+        pi._managed("test:registry", SimpleNamespace(entries=tuple(entries), environment=SimpleNamespace(runtime=lambda source: object(), prepare_process=lambda: None, device="cpu")), "/unused", {}, 0, "unused", owner, path)
     assert owner.state == "held" and not path.exists()
 
 
@@ -116,51 +119,14 @@ def test_missing_report_cannot_become_a_success(entries, tmp_path, monkeypatch):
     path = tmp_path / "report.json"
 
     def managed(worker_class, kwargs, extension, received_owner):
+        kwargs["record"]["worker_closed"] = True
         owner.state = "released"
 
     monkeypatch.setattr(runtime_extensions, "run_managed_worker", managed)
-    pi._managed("test:registry", {}, object(), owner, path)
+    pi._managed("test:registry", SimpleNamespace(entries=tuple(entries), environment=SimpleNamespace(runtime=lambda source: object(), prepare_process=lambda: None, device="cpu")), "/unused", {}, 0, "unused", owner, path)
     report = json.loads(path.read_text())
     assert report["status"] == "FAIL" and not report["complete"]
-    assert "without producing a registry report" in report["driver_error"]
-
-
-@pytest.mark.parametrize("missing,code", [
-    ("assets", "reference_assets_unavailable"),
-    ("transformers", "reference_dependency"),
-    ("mstar_pi", "target_unavailable"),
-    ("device", "target_unavailable"),
-])
-def test_missing_prerequisite_skips_every_registration_before_reservation(
-        entries, tmp_path, monkeypatch, missing, code):
-    checkpoint, audio = tmp_path / "checkpoint", tmp_path / "input.wav"
-    checkpoint.mkdir()
-    audio.write_bytes(b"not decoded by preflight")
-    options = {} if missing == "assets" else {"checkpoint": str(checkpoint), "audio": str(audio)}
-    probes = []
-    backend = ModuleType("mstar_pi")
-
-    def available():
-        probes.append("read-only capability probe")
-        return missing != "device"
-
-    backend.is_available = available
-    monkeypatch.setitem(sys.modules, "mstar_pi", backend)
-    monkeypatch.setattr(pi.importlib.util, "find_spec",
-                        lambda name: None if name == missing else object())
-    runtime = ModuleType("mstar_accelerators.backends.pi.runtime")
-
-    def forbidden_reservation(*args, **kwargs):
-        raise AssertionError("a missing prerequisite must not construct a native runtime")
-
-    runtime.PiRuntime = forbidden_reservation
-    monkeypatch.setitem(sys.modules, runtime.__name__, runtime)
-    report = pi.run("test:registry", options)
-    assert report["status"] == "SKIP" and not report["complete"]
-    assert report["counts"] == {"PASS": 0, "FAIL": 0, "SKIP": 3}
-    assert report["native_owner_reserved"] is False
-    assert all(item["details"]["code"] == code for item in report["accelerations"])
-    assert probes == (["read-only capability probe"] if missing == "device" else [])
+    assert "without producing a registry report" in report["worker_error"]
 
 
 @pytest.mark.parametrize("settlement_failure", [False, True])
@@ -233,12 +199,17 @@ def test_registered_implementation_chooses_provider_through_the_actual_reference
     acceleration = Acceleration(WhisperEncoderSubmodule,
                                 When(Eq("device_type", "cpu"), Eq("graph_walk", "prefill"), Eq("batch_size", 1)),
                                 Implementation(prepare))
-    monkeypatch.setattr(pi, "_registry", lambda source: {"encoder": acceleration})
+    monkeypatch.setattr(pi, "_entries", lambda source, job: {"encoder": acceleration})
+    monkeypatch.setattr(pi, "load_accelerations", lambda source: {"encoder": acceleration})
     record = {"results": [], "active": None}
-    worker = pi._Worker(worker_id="controller-test", device="cpu",
-                        runtime_extension=SimpleNamespace(drain=lambda: calls.append("drain")),
-                        registry_spec="synthetic:registry",
-                        options={"checkpoint": "/unused", "audio": "/unused"}, record=record)
+    from mstar_accelerators.testing.planning import Job
+    case = SimpleNamespace(describe=lambda checkpoint: model)
+    environment = SimpleNamespace(stream=backend.current_stream)
+    job = Job(case, environment, 1, ('audio_encoder',), ('encoder',), ())
+    worker = pi.Worker(worker_id="controller-test", device=torch.device('cpu'),
+        runtime_extension=SimpleNamespace(drain=lambda: calls.append("drain")),
+        source="synthetic:registry", job=job, checkpoint="/unused", fixtures={'audio': '/unused'},
+        record=record, rank=0, rendezvous='unused')
     if settlement_failure:
         with pytest.raises(RuntimeError, match="completion is uncertain"):
             worker.run()

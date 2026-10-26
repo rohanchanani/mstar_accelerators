@@ -298,3 +298,13 @@ M*. Different checks, numerical budgets, agent review, type checking and more
 powerful test generation can extend this consumer through separate, justified
 platform-policy changes. See
 `QUALIFICATION.md` for the concrete first policies and honest scope limits.
+
+## Automatic qualification setup
+
+The testing entry point accepts a registry and report destination. The platform
+corpus supplies pinned model configurations and fixtures; M* describes logical
+nodes. Backend discovery supplies only hardware and lifecycle facts. The central
+planner matches reference types and specializes support, and the central model
+consumer materializes cases for execution through M*. The resulting plan is
+report data, never an input interface or optimizer-authored configuration.
+Missing environments, assets and unsupported case domains remain missing evidence.

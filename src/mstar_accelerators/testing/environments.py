@@ -1,18 +1,9 @@
-"""Consume the complete corpus in configured execution environments.
-
-Environment configuration supplies assets and placement, never a registration
-or mode filter. Each environment uses the same differential consumer and model
-adapter. A missing applicable environment remains missing evidence; no observed
-failure can be hidden by a pass elsewhere.
-"""
+"""Automatic registry qualification: corpus × discovered execution environments."""
 from __future__ import annotations
-
-from mstar.engine.execution import Support
 
 from ..sources import load_accelerations, normalize_source
 from .harness import Result, Status, run_registry
 from .numerics import DEFAULT
-from .configuration import environments as configured_environments
 from .policy import identity
 
 
@@ -40,7 +31,7 @@ def combine(name, observations, *, scope, irrelevant=()):
     elif statuses and all(value == "PASS" for value in statuses):
         status, reason = Status.PASS, "all participating executions passed"
     else:
-        status, reason = Status.SKIP, "no configured execution environment produced evidence"
+        status, reason = Status.SKIP, "no discovered execution environment produced evidence"
     return Result(name, status, reason, checks, {
         "scope": scope,
         "observations": {label: {key: value for key, value in result.items() if key != "checks"}
@@ -49,39 +40,80 @@ def combine(name, observations, *, scope, irrelevant=()):
     })
 
 
-def run(registry_spec, options):
-    from . import distributed, pi, qwen3_omni
+def run(registry_spec):
+    from ..backends.discovery import discover
+    from . import assets, corpus, hosting, planning
+    from .harness import Unavailable
 
-    environments = configured_environments(options)
     registry_spec = normalize_source(registry_spec)
     entries = load_accelerations(registry_spec)
-    reports = {}
-    targets = {}
-    for index, (kind, config) in enumerate(environments):
-        driver, device = {"pi": (pi.run, "mstar_pi"),
-                          "cpu": (distributed.run, "cpu"),
-                          "rocm": (qwen3_omni.run, "cuda")}[kind]
-        label = f"{index}:{kind}"
-        reports[label] = driver(registry_spec, config)
-        targets[label] = {"device_type": device}
-        names = [row["name"] for row in reports[label]["accelerations"]]
-        if names != list(entries):
-            raise ValueError(f"{label}: environment changed the corpus inventory")
-
-    rows = {label: {row["name"]: row for row in report["accelerations"]}
+    environments = discover()
+    plan = {'version': 1, 'environments': [env.receipt() for env in environments],
+            'models': [], 'jobs': []}
+    jobs, reports = [], {}
+    for case in corpus.MODELS:
+        try:
+            model = case.describe()
+            derived, description = planning.placements(case, model, entries, environments)
+            plan['models'].append(description)
+            jobs.extend(derived)
+        except ModuleNotFoundError as exc:
+            # Only genuinely absent optional packages are missing evidence;
+            # missing internal modules and import bugs remain failures.
+            plan['models'].append({'model': case.identity(), 'missing_dependency': str(exc)})
+            status = Status.SKIP if exc.name in {'transformers', 'safetensors', 'huggingface_hub'} else Status.FAIL
+            reports['description:' + case.key] = run_registry(entries, lambda name, acc: Result(
+                name, status, str(exc), details={'code': 'reference_dependency'})).to_dict()
+        except Exception as exc:
+            reports['description:' + case.key] = run_registry(entries, lambda name, acc: Result(
+                name, Status.FAIL, f'{type(exc).__name__}: {exc}',
+                details={'code': 'invalid_corpus_description'})).to_dict()
+    resolved = {}
+    for job in jobs:
+        receipt = job.receipt()
+        plan['jobs'].append(receipt)
+        subset = {name: entries[name] for name in job.entries}
+        try:
+            if (reason := job.unavailable_reason()) is not None:
+                raise Unavailable('target_unavailable', reason)
+            if job.case.key not in resolved:
+                resolved[job.case.key] = assets.resolve(job.case)
+            checkpoint, fixtures, asset_receipt = resolved[job.case.key]
+            receipt['assets'] = asset_receipt
+            reports[job.key] = hosting.execute(registry_spec, job, checkpoint, fixtures)
+        except Unavailable as exc:
+            receipt['unavailable'] = {'code': exc.code, 'reason': str(exc)}
+            reports[job.key] = run_registry(subset, lambda name, acc: Result(
+                name, Status.SKIP, str(exc), details={'code': exc.code, 'executed': False})).to_dict()
+        except Exception as exc:
+            receipt['error'] = f'{type(exc).__name__}: {exc}'
+            reports[job.key] = run_registry(subset, lambda name, acc: Result(
+                name, Status.FAIL, receipt['error'], details={'code': 'execution_or_integrity_failure'})).to_dict()
+            # Do not initialize another job after uncertain native ownership.
+            if job.environment.device_type != 'cpu':
+                break
+    attempted = set(reports)
+    for job in jobs:
+        if job.key not in attempted:
+            reports[job.key] = run_registry({name: entries[name] for name in job.entries},
+                lambda name, acc: Result(name, Status.SKIP, 'not executed after prior failure')).to_dict()
+    rows = {label: {row['name']: row for row in report['accelerations']}
             for label, report in reports.items()}
-
     def consume(name, acceleration):
-        return combine(name, {label: values[name] for label, values in rows.items()},
-                       scope="whole corpus across configured execution environments",
-                       irrelevant={label for label, facts in targets.items()
-                                   if acceleration.when.evaluate(facts) is Support.NO})
+        observations = {label: values[name] for label, values in rows.items() if name in values}
+        if not observations:
+            matched = [item['model'] for item in plan['models']
+                       if name in item.get('matched_entries', ())]
+            return Result(name, Status.SKIP,
+                'no supported placement in the central domain' if matched else
+                'no corpus logical node matched this reference',
+                details={'code': 'placement_unavailable' if matched else 'reference_unavailable',
+                         'matched_models': matched, 'executed': False})
+        return combine(name, observations, scope='platform corpus across discovered supported placements')
 
     report = run_registry(entries, consume).to_dict()
-    report.update(policy=DEFAULT.name, qualification_policy=identity(), environments={
-        label: {key: value for key, value in result.items() if key != "accelerations"}
-        for label, result in reports.items()})
-    # Startup failures can happen before any registration is active.
-    if any(result["status"] == "FAIL" for result in reports.values()):
-        report["status"] = "FAIL"
+    report.update(policy=DEFAULT.name, qualification_policy=identity(),
+                  execution_plan=plan, executions=reports)
+    if any(result['status'] == 'FAIL' for result in reports.values()):
+        report['status'] = 'FAIL'
     return report

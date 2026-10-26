@@ -207,11 +207,12 @@ def test_campaign_stage_retains_actual_child_failure_and_stops(tmp_path):
     assert "retained child failure" in (tmp_path / "first.log").read_text()
 
 
-def test_launch_configuration_supplies_environment_not_test_case_policy():
-    config = {"model_kwargs": {"model_path_hf": "/checkpoint"},
-              "runtime_extension": {"nodes": ["Thinker", "Talker", "audio_encoder"]}}
-    assert load_tool("run_foundation").qualification_options(config) == \
-        {"checkpoint": "/checkpoint", "device": "cuda:0", "threads": 4}
+def test_campaign_cannot_supply_test_configuration():
+    source = (ROOT / 'tools/qwen3_omni/run_foundation.py').read_text()
+    assert 'qualification_options' not in source
+    assert 'qualification-config.json' not in source
+    assert '"--registry", registry' in source
+    assert '"--report", str(qualification)' in source
 
 
 def test_source_archive_identity_uses_its_own_files_and_changes_with_source(tmp_path):

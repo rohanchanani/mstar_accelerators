@@ -221,8 +221,8 @@ project. The exact file list is also available in the generated patch inventory.
   exact observations and retained historical pointwise diagnostic.
 - `testing/models/whisper.py`: independent encoder/prefill/decode cases using
   model-owned CPU references, actual registered preparation and M* state plans.
-- `testing/policy.py`, `configuration.py`, `__main__.py`: centralized reference/coverage
-  selection and an environment-only CLI. `testing/pi.py` hosts managed execution;
+- `testing/policy.py`, `corpus.py`, `planning.py`, `__main__.py`: centralized reference/coverage
+  selection and automatic corpus/environment inference. `testing/hosting.py` hosts managed execution;
   `testing/runtime.py` drives M* Engine and observes the result-adaptation boundary.
   No test verdict enters M* serving or the declaration's three-field identity.
 - `src/mstar_accelerators/testing/whisper.py`: shared input, observation,

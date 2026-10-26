@@ -7,7 +7,6 @@ The engine owns every actual request, KV allocation, sampler and graph replay.
 from __future__ import annotations
 
 from collections import defaultdict
-from pathlib import Path
 from types import SimpleNamespace
 
 import torch
@@ -34,15 +33,11 @@ WALKS = ('talker_prefill', 'talker_last_prefill', 'talker_decode')
 
 def _configuration(options):
     config = {}
-    if options.get('deployment'):
-        import yaml
-        config = yaml.safe_load(Path(options['deployment']).read_text())
-    config = dict(config)
     config['max_concurrent_requests'] = max(QWEN_BATCHES)
     config['runtime_extension'] = {'nodes': ['Talker']}
     config.setdefault('autocast_dtype', options.get('dtype', 'bfloat16'))
-    # This finite test uses the deployment budget when supplied; the default
-    # holds all short requests and donor prefill capture buckets comfortably.
+    # The central finite-domain budget holds all short requests and prefill
+    # capture buckets. M* resolves and allocates the requested resources.
     config['resources'] = {**config.get('resources', {})}
     config['resources'].setdefault(TALKER_KV, {'max_bytes': 640 * 1024**2, 'prefix_cache': False})
     return config

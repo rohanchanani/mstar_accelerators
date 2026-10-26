@@ -20,38 +20,27 @@ def test_cli_has_no_driver_override(tmp_path):
     assert error.value.code == 2
 
 
-@pytest.mark.parametrize("key,value", [
-    ("driver", "arbitrary:run"), ("batches", [1]), ("decode_steps", 1),
-    ("comparator", "arbitrary:compare"), ("atol", 100), ("max_trials", 1),
-])
-def test_environment_cannot_override_testing_policy(tmp_path, key, value):
-    config = tmp_path / "config.json"
-    report = tmp_path / "report.json"
-    config.write_text(json.dumps({"environments": [{"kind": "rocm", key: value}]}))
-    with pytest.raises(ValueError, match="central harness"):
-        main(["--config", str(config), "--report", str(report)])
-    assert not report.exists()
+@pytest.mark.parametrize('flag', ['--config', '--driver'])
+def test_no_user_config_or_driver_surface(tmp_path, flag):
+    with pytest.raises(SystemExit) as error:
+        main([flag, 'unused', '--report', str(tmp_path / 'report.json')])
+    assert error.value.code == 2
 
 
-def test_report_identifies_central_policy(tmp_path):
-    report = tmp_path / "report.json"
-    assert main(["--report", str(report)]) == 0
-    result = json.loads(report.read_text())
-    assert result["qualification_policy"]["qwen_batches"] == [1, 2, 8]
-    assert result["qualification_policy"]["qwen_decode_steps"] == 3
-    assert "driver" not in result
-
-
-def test_default_catalog_can_be_discovered_without_model_assets_or_native_initialization(tmp_path):
-    from mstar_accelerators.catalog import accelerations
-
-    report = tmp_path / "discovery.json"
-    assert main(["--report", str(report)]) == 0
-    result = json.loads(report.read_text())
-    assert result["status"] == "SKIP" and not result["complete"]
-    assert result["counts"] == {"PASS": 0, "FAIL": 0, "SKIP": len(accelerations)}
-    assert [item["name"] for item in result["accelerations"]] == list(accelerations)
-    assert result["environments"]["0:pi"]["native_owner_reserved"] is False
+def test_report_contains_inferred_plan_and_central_policy(tmp_path, monkeypatch):
+    from mstar_accelerators.testing import __main__ as cli
+    calls = []
+    def run(registry):
+        calls.append(registry)
+        return {'status': 'SKIP', 'complete': False,
+                'execution_plan': {'jobs': []},
+                'qualification_policy': {'id': 'registry-differential-v1'}}
+    monkeypatch.setattr(cli, 'run', run)
+    path = tmp_path / 'report.json'
+    assert main(['--registry', 'chosen:entries', '--report', str(path)]) == 0
+    report = json.loads(path.read_text())
+    assert calls == ['chosen:entries'] and report['execution_plan'] == {'jobs': []}
+    assert 'config' not in report
 
 
 def test_empty_corpus_is_diagnostic_and_strict_coverage_remains_a_harness_choice(tmp_path):
@@ -64,5 +53,5 @@ def test_empty_corpus_is_diagnostic_and_strict_coverage_remains_a_harness_choice
     assert result["status"] == "SKIP" and not result["complete"]
     assert result["counts"] == {"PASS": 0, "FAIL": 0, "SKIP": 0}
     assert result["accelerations"] == []
-    assert result["environments"]["0:pi"]["native_owner_reserved"] is False
+    assert result["execution_plan"]["jobs"] == []
     assert main([*args, "--require-all-pass"]) == 1

@@ -20,3 +20,6 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.setuptools.package-data]
+"mstar_accelerators.testing" = ["corpus_data/*/*.json", "corpus_data/*/*.wav"]

@@ -7,18 +7,33 @@ evidence. M* owns serving. The logical reference still identifies the transition
 `R[W,C](I,S) -> (O,S',E)`; testing that transition is a separate engineering job.
 
 The public entry point is `python -m mstar_accelerators.testing`. It accepts a
-registry subset, an environment/assets configuration and a report destination.
-There is no driver/plugin selection. Unknown configuration keys are rejected,
-including attempts to set comparison tolerances, reference functions, batch
-coverage, decode-step coverage or solver bounds.
+registry subset and a report destination, with optional `--require-all-pass`.
+It accepts no configuration, driver, model, checkpoint, comparator, tolerance,
+case-domain or topology argument. The execution plan is an output, never an input.
 
-`testing/policy.py` resolves reference adapters from the logical model and fixes
-the existing differential consumer and numerical comparator. Environment hosts
-supply model assets, placement and managed process/device lifetimes. They do not
-choose the correctness procedure. The unchanged Qwen default domain is batches
-1, 2 and 8 with three decode steps; Whisper retains its declared-alternative,
-paired-state, lifetime and sampling policies. Earlier reduced research runs are
-still evidence for their recorded scope, not full coverage.
+The inference procedure is:
+
+1. Load the selected declarations' existing `reference` and `when`.
+2. Describe the platform-owned pinned model corpus using M*'s model registry,
+   `Model.describe`, graph declarations and `create_submodule`. Match the exact
+   logical reference type, as the production registry does.
+3. Discover hardware independently: devices, capabilities, topology and existing
+   runtime lifecycle. Backend discovery contains no model or correctness policy.
+4. Combine logical facts, hardware facts and the central coverage domain;
+   specialize `when`. The existing model-aware constructors and condition solver
+   produce valid invocation/history witnesses. M* resolves and owns resources.
+5. Execute through M*, compare centrally, and retain the inferred placements,
+   asset identities, missing coverage, solver witnesses and observations.
+
+`testing/policy.py` retains the reference adapters and numerical comparator.
+Qwen covers batches 1, 2 and 8 with three decode steps; Whisper retains its
+existing declared-alternative, paired-state, lifetime and sampling checks.
+Placement coverage is bounded TP1/TP2 and SP1 where hardware can host it. A new
+acceleration of the supported logical model/backend needs no test registration,
+callback or recipe. New logical semantics need centrally reviewed model/case
+support; new hardware needs discovery/lifecycle support. Neither extension belongs
+to an optimizer's declaration. Unsupported or unresolved domains stay explicit
+missing evidence; this finite corpus does not prove arbitrary advertised shapes.
 
 Candidate execution uses M*'s actual engine. Qwen retains its `EngineManager`
 path. Whisper uses `Engine.load_model`, `prepare_inputs` and `exec`; the engine
@@ -50,7 +65,7 @@ without a reference adapter remains deployable and is diagnosed SKIP here.
 
 Missing references, missing test assets and unavailable target hardware produce
 SKIP before physical submission. An explicitly unsupported reference can use the
-adapter's `Unavailable` preflight result. Malformed configured assets, bugs in
+adapter's `Unavailable` preflight result. Corrupt pinned assets, bugs in
 reference code and failures after submission are not silently reclassified as
 unavailability. Unexpected execution errors leave the normal consumption loop:
 the existing managed worker drains or holds before any native cleanup/reuse.
@@ -70,10 +85,13 @@ hardware environment a failing test suite.
 | `testing/numerics.py` | Centralized numerical and exact-value policy |
 | `testing/sampling.py` | Bounded categorical support, distribution and seed-set policy, independent of RNG algorithm |
 | `testing/models/whisper.py` | Constructible Whisper cases, independent executable reference and state interpretation |
-| `testing/pi.py` | Pi execution environment; existing M* managed-worker ownership and release |
-| `testing/distributed.py` | CPU role environment using the same consumer, binding and M* agreement |
-| `testing/environments.py` | Whole-corpus aggregation across configured execution environments |
-| `testing/__main__.py`, `configuration.py` | Central entry point, environment-only schema and report/exit policy |
+| `testing/corpus.py`, `testing/corpus_data/` | Platform-owned pinned model/configuration/fixture identities |
+| `testing/assets.py` | Standard-cache resolution and checksum verification |
+| `backends/discovery.py` | Model-independent hardware inventory and existing runtime factories |
+| `testing/planning.py` | Logical reference matching and inferred supported placements |
+| `testing/hosting.py` | Generic managed worker and actual M* communication groups |
+| `testing/environments.py` | Inference orchestration and coverage aggregation |
+| `testing/__main__.py` | Config-free entry point and report/exit policy |
 | `testing/policy.py` | Reference resolution, coverage defaults and fixed comparator |
 | `testing/runtime.py` | Case placement and read-only observations around the actual M* engine |
 | `testing/whisper.py` | Shared input, observation, state and lifetime helpers for the centralized model adapter |
@@ -347,102 +365,56 @@ qualification. Serving consumes neither verdict nor distribution policy.
 
 ## 6. Running centralized qualification
 
-Without assets, ordinary discovery is a successful command with an honest SKIP
-report and no native initialization:
-
-```bash
-python -m mstar_accelerators.testing --report discovery.json
-```
-
-A target configuration contains, for example:
-
-```json
-{
-  "checkpoint": "/absolute/path/to/verified/checkpoint",
-  "audio": "/absolute/path/to/jfk16k.wav",
-  "threads": 4,
-  "validation": true,
-  "wait_timeout_ms": 180000
-}
-```
-
-Run the Pi consumer only through the established shared-device launcher:
-
-```bash
-python backends/pi/tools/run_hardware.py --managed --deadline 3600 -- \
-  python -m mstar_accelerators.testing --config /absolute/path/to/case.json \
-    --report /absolute/path/to/registry.json --require-all-pass
-```
-
-The environment host supplies the corpus and managed execution context to the
-central policy. Each implementation chooses its programming model and any
-optional graph provider; the environment host does not inject one into generic binding.
-
-Consume the complete corpus. The environment host does not select modes or supply a list
-of individual tests. The differential consumer derives the current coverage from
-each acceleration's declaration. The result has one verdict per actual
-registration: a combined decoder includes both solved alternatives; intentional
-prefill/decode variants have their own verdicts and the sampled transition
-evidence described above. Increasing the coverage
-policy belongs to the centralized consumer, not to a recipe or another file.
-
-The default is a spawned worker. `in_process: true` selects the same managed
-owner in the launcher's child for a separate parent/spawn comparison. This is
-not permission to bypass the launcher or an unresolved device quarantine.
-
-The current delivery recipe pins source/artifact identities, repeats the actual
-service, and preserves the old failed receipts. Backend Stage 1/2/graph transfer,
-linear and lifetime conformance gates keep their original strict policies. They
-test a different boundary and are not silently loosened by this node-level policy.
-
-## 7. Whole-corpus consumption across native and CPU roles
-
-Package 3 retains the native corpus and adds an explicitly CPU authoring target.
-Use the same qualification command with multiple execution environments:
-
 ```bash
 python -m mstar_accelerators.testing \
   --registry /absolute/path/to/accelerations \
-  --config /absolute/path/to/environments.json \
   --report /absolute/path/to/qualification.json --require-all-pass
 ```
 
-When a configured environment initializes Pi execution, that command still runs
-under the established managed physical-device launcher. An example configuration
-contains assets and environments only:
+Omit `--registry` to discover the checkout's entire registry. Arbitrary subsets
+are supported. No acceleration-specific test settings are needed or accepted.
+Small pinned model descriptions and fixtures ship with the harness. Checkpoints
+are resolved from the standard Hub cache using the corpus's immutable revisions;
+all required bytes are checked against the manifest before execution. Use the
+ordinary Hub tooling or the repository's asset preparation tools to populate
+that cache. `HF_HOME` and `HF_HUB_CACHE` are ordinary asset-location environment
+variables, not correctness or coverage controls. The harness does not download
+tens of gigabytes merely to discover an unavailable target.
 
-```json
-{
-  "checkpoint": "/absolute/path/to/verified/checkpoint",
-  "audio": "/absolute/path/to/jfk16k.wav",
-  "environments": [
-    {"kind": "pi", "threads": 4, "validation": true, "wait_timeout_ms": 180000},
-    {"kind": "cpu", "tp_size": 2, "threads": 1,
-     "collective_timeout_seconds": 180, "deadline_seconds": 7200}
-  ]
-}
+For Pi, the same command runs under its established ownership launcher:
+
+```bash
+python backends/pi/tools/run_hardware.py --managed --deadline 3600 -- \
+  python -m mstar_accelerators.testing \
+    --registry /absolute/path/to/accelerations \
+    --report /absolute/path/to/registry.json --require-all-pass
 ```
 
-Both environments receive the entire corpus. They use the same
-`DifferentialConsumer`, declared-alternative solver, Whisper case adapter and
-numerical/exact policies. There is no registration or walk filter. Static
-non-applicability is recorded separately from a missing applicable target or
-unresolved case. A PASS elsewhere cannot erase an observed failure or an
-applicable missing-evidence SKIP. Startup/teardown failures remain environment FAIL
-even if they occur outside an active registration.
+Without available pinned assets or applicable hardware, the report retains
+missing evidence and no physical worker is reserved. A checksum mismatch is a
+failure, not an unavailable reference. Actual computation and teardown failures
+remain failures. Qualification never narrows a declaration to hide a failure.
 
-The final report has one aggregate verdict per registration. Its nested
-observations preserve each environment and role, and each comparison's
-`observation_path` identifies that provenance. Comparison counts include actual
-per-role checks; duplicated observations are not new independent samples. Empty
-or wholly inapplicable coverage remains SKIP. This policy covers configured
-environments and bounded witnesses, not every hardware/parallelism circumstance
-advertised by an arbitrary declaration.
+The `execution_plan` records the platform corpus/revisions, discovered devices,
+logical reference matches, placement facts, generated jobs, verified assets and
+unavailable prerequisites. `executions` retains worker/role observations, the
+existing case domains and solver witnesses, references and comparison results.
+A passing placement cannot erase a failed or missing applicable placement.
+No external plan is parsed back into the harness.
+
+## 7. Actual runtime execution across backends and roles
+
+The generic host receives an inferred logical-model placement. It initializes
+the existing backend runtime, creates M*'s communication groups, and delegates
+to the central logical-model consumer. It does not choose a model, case,
+reference or numerical policy. Each implementation chooses its programming
+model and optional graph provider; the host does not inject one.
 
 ### CPU TP2 state and execution
 
-The CPU environment launches two real spawned processes. Role zero hosts the
-TP1 encoder; both roles host the TP2 decoder. It initializes the same M* CPU
+The inferred CPU TP1 encoder placement uses one spawned process; the TP2
+decoder placement uses two. These placements follow logical reference matching
+and `when`, not encoder/decoder rules in the backend. It initializes the same M* CPU
 groups used by serving and binds the actual registered preparation callbacks.
 Workspace selection and resource admission use `ExecutionAgreement`, including
 rollback on peer refusal. Resolved resource geometry and candidate identities

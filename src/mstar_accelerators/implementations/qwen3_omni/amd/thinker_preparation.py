@@ -2,14 +2,15 @@
 from copy import deepcopy
 import torch
 from mstar.model.loader import load_hf_weights
-from mstar.model.components.moe import prepare_moe_weights
 from .preparation import stacked_parameter_rules, remap_checkpoint_name
-from .thinker_model import Qwen3OmniThinkerModel
-from .thinker_program import ThinkerProgram
-from .moe import select_expert_kernels
 
 
 def build_thinker(binding):
+    # Physical dependencies are needed at preparation, not registry discovery.
+    from mstar.model.components.moe import prepare_moe_weights
+    from .thinker_model import Qwen3OmniThinkerModel
+    from .thinker_program import ThinkerProgram
+    from .moe import select_expert_kernels
     config = deepcopy(binding.model.config)
     with torch.device("meta"):
         model = Qwen3OmniThinkerModel(config, comm_group=binding.tp_group)

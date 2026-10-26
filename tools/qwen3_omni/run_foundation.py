@@ -6,6 +6,7 @@ import argparse
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -22,7 +23,7 @@ def save(path, record):
     path.write_text(json.dumps(record, indent=2) + "\n")
 
 
-def run_stage(name, command, output, record, *, cwd):
+def run_stage(name, command, output, record, *, cwd, env=None):
     """A stage cannot hand control to its successor after a failed subprocess."""
     log_path = output / f"{name}.log"
     stage = {"name": name, "command": command, "log": str(log_path)}
@@ -32,7 +33,7 @@ def run_stage(name, command, output, record, *, cwd):
     start = time.monotonic()
     with log_path.open("w") as log:
         process = subprocess.Popen(command, cwd=cwd, stdout=subprocess.PIPE,
-                                   stderr=subprocess.STDOUT, text=True)
+                                   stderr=subprocess.STDOUT, text=True, env=env)
         for line in process.stdout:
             log.write(line)
             log.flush()
@@ -50,13 +51,6 @@ def check_qualification_report(report):
             or any(row.get("status") != "PASS" for row in report["accelerations"])):
         raise RuntimeError("central qualification must report complete PASS for every selected acceleration")
     return {"status": "PASS", "complete": True, "counts": report["counts"]}
-
-
-def qualification_options(deployment):
-    if deployment.get("runtime_extension", {}).get("nodes") != ["Thinker", "Talker", "audio_encoder"]:
-        raise ValueError("the AMD campaign requires the external Thinker, Talker and audio-encoder deployment")
-    return {"checkpoint": deployment["model_kwargs"]["model_path_hf"],
-            "device": "cuda:0", "threads": 4}
 
 
 def main(argv=None):
@@ -96,14 +90,18 @@ def main(argv=None):
             assets.append("--offline")
         run_stage("assets", assets, output, record, cwd=ROOT)
         config = yaml.safe_load(deployment.read_text())
-        options = qualification_options(config) | {"deployment": str(deployment)}
-        options_path = output / "qualification-config.json"
-        save(options_path, {"environments": [{"kind": "rocm", **options}]})
         registry = config["runtime_extension"]["accelerations"]
+        if args.checkpoint:
+            checkpoint = args.checkpoint.resolve()
+            if checkpoint.parent.name != 'snapshots':
+                raise ValueError('qualification requires the pinned checkpoint in a standard Hub cache')
+            cache = checkpoint.parent.parent.parent
+        else:
+            cache = work / 'hf'
         run_stage("qualification", [sys.executable, "-m", "mstar_accelerators.testing",
                   "--registry", registry,
-                  "--config", str(options_path), "--report", str(qualification), "--require-all-pass"],
-                  output, record, cwd=ROOT)
+                  "--report", str(qualification), "--require-all-pass"],
+                  output, record, cwd=ROOT, env=os.environ | {"HF_HUB_CACHE": str(cache)})
         record["qualification"] = check_qualification_report(json.loads(qualification.read_text()))
         record["qualification"]["report"] = str(qualification)
         record["qualification"]["sha256"] = hashlib.sha256(qualification.read_bytes()).hexdigest()
