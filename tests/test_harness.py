@@ -256,11 +256,17 @@ def test_case_reference_cycles_released_after_comparison_before_next_case():
         owner = ReferenceOwner()
         owner.cycle = owner
         roots.append(weakref.ref(owner))
-        return [Comparison('value', 1, 1, promoted=lambda: owner)]
+        def promoted():
+            assert all(root() is None for root in roots)
+            return 1
+        return [Comparison('value', 1, 1, promoted=promoted)]
     declaration = Acceleration(Reference, Or(Eq('walk', 'a'), Eq('walk', 'b')),
                                Implementation(lambda binding, resources: None))
+    def compare(acceleration, observation):
+        observation.promoted()
+        return exact_comparator(acceleration, observation)
     consumer = DifferentialConsumer({Reference: lambda *_: CasePlan(
-        {}, {'walk': ('a', 'b')}, execute, 'reference', 'host')}, exact_comparator)
+        {}, {'walk': ('a', 'b')}, execute, 'reference', 'host')}, compare)
     enabled = gc.isenabled()
     gc.disable()
     try:

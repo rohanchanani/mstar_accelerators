@@ -171,8 +171,13 @@ class DifferentialConsumer:
                 incomplete |= solved.status is SolveStatus.UNRESOLVED
                 continue
             details["executed"] = case["executed"] = True
+            comparisons = plan.execute(solved.facts)
+            # Execution may have settled engines whose reference cycles retain
+            # large buffers. Reclaim them before a lazy promoted comparison.
+            gc.collect()
             observed = [dict(self.comparator(acceleration, comparison), case_index=index)
-                        for comparison in plan.execute(solved.facts)]
+                        for comparison in comparisons]
+            del comparisons
             case["comparisons"] = len(observed)
             empty_case |= not observed
             checks.extend(observed)
