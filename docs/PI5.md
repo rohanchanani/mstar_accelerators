@@ -1,7 +1,7 @@
 # Whisper on Pi 5
 
 Run from the external repository root, in the accepted Pi environment with the
-matching M* fork and this repository installed editable. The merged environment
+M* revision in [MSTAR_REVISION](../MSTAR_REVISION) and this repository installed editable. The merged environment
 uses AArch64 Python 3.13.5, Torch 2.10.0+cpu and a matching native-extension ABI.
 The preserved Torch 2.9.1 control remains separate; target qualification of the
 merged environment must complete before attributing the earlier measurements to it.
@@ -14,6 +14,12 @@ Choose an absolute work directory outside both repositories. Keep the build,
 rendered deployment and receipts there. All paths below are examples to replace.
 
 ## CPU build and deployment
+
+After preparing the environment above, install both checkouts from this repository:
+
+```sh
+python -m pip install -e '../mstar[asr]' -e .
+```
 
 Build the single CPU library using the pinned dependencies and preset in the
 [CPU backend guide](../backends/cpu_ggml/README.md):

@@ -210,8 +210,9 @@ sampling lifecycle.
 
 ## How do I run it?
 
-Use editable installations of this repository and the matching M* fork. The
-corpus, deployment templates and tools live in the checkout, not the Python wheel.
+Use editable installations of this repository and the M* revision recorded in
+[MSTAR_REVISION](MSTAR_REVISION). The corpus, deployment templates and tools live
+in the checkout, not the Python wheel.
 
 - **Pi 5:** [Pi walkthrough](docs/PI5.md) covers the CPU build, assets,
   qualification and ordinary serving. [V3D backend documentation](backends/pi/README.md)
@@ -225,30 +226,30 @@ hardware produce explicit SKIPs. Serving never depends on a qualification verdic
 
 ## Changes to M*
 
-The fork changes fall into four categories. Some are already shared; others are
-on the Pi or AMD branch and will be combined during integration.
+The integrated fork changes fall into four categories. The source map below
+describes their owners in the paired runtime.
 
 | Category | What belongs in M* | Main consumers / source |
 | --- | --- | --- |
 | Acceleration integration | Logical model/weight descriptions; candidate support and workspace admission; physical resource requests; execution and distributed agreement. | [`NodeBinding` / `NodeAssembly`][binding], [`ExecutionCapabilities`][execution], [engine][engine], [resource binding][resources], [`ExecutionAgreement`][agreement]. |
-| Runtime optimizations | Retain prepared inputs across retries; eliminate selection only when a fixed implementation is proved; preserve commit/collection overlap. Pi also adds lazy host KV plans and reduces client notification/transport overhead. | [Engine][engine], [KV planning][kv], `api_server/data_worker.py`, `conductor/conductor.py`, `worker/worker.py`. |
+| Runtime optimizations | Retain prepared inputs across retries; eliminate selection only when a fixed implementation is proved; preserve commit/collection overlap. Host KV plans are materialized lazily; result delivery retains upstream’s collector and disconnect handling. | [Engine][engine], [KV planning][kv], `api_server/data_worker.py`, `conductor/conductor.py`, `worker/worker.py`. |
 | Resource correctness and hardware support | Preserve positions and RNG offsets across repeated registration and eager/captured execution; provide ROCm attention, norm, RoPE and sampling implementations. Pi adds explicit KV storage encoding and backend lifetime integration. | [Sampler][sampler], [positions][positions], [resource views][views], [platform dispatch][platforms]. |
 | Model and API integration | Logical Qwen/Whisper shells, checkpoint identities, result mapping, media decoding and transcription/speech endpoints. | [Logical Qwen model][qwen], [logical contracts][contracts], `model/whisper/`, `api_server/`. |
 
 Model-specific optimized programs and kernels stay in **this** repository.
 Generic resource algorithms and serving machinery stay in **M***. The registry,
 generator, binder and qualification harness also live here; they are not another
-server or another source of request state. [Detailed merge responsibilities](docs/MSTAR_CHANGES.md).
+server or another source of request state. [Detailed runtime responsibilities](docs/MSTAR_CHANGES.md).
 
-[binding]: https://github.com/rohanchanani/mstar-amd-c/blob/8ab466e2100fa464ae73f3927042fe1e7f04821b/mstar/model/binding.py
-[execution]: https://github.com/rohanchanani/mstar-amd-c/blob/8ab466e2100fa464ae73f3927042fe1e7f04821b/mstar/engine/execution.py
-[engine]: https://github.com/rohanchanani/mstar-amd-c/blob/8ab466e2100fa464ae73f3927042fe1e7f04821b/mstar/engine/engine.py
-[resources]: https://github.com/rohanchanani/mstar-amd-c/blob/8ab466e2100fa464ae73f3927042fe1e7f04821b/mstar/engine/resources/binding.py
-[agreement]: https://github.com/rohanchanani/mstar-amd-c/blob/8ab466e2100fa464ae73f3927042fe1e7f04821b/mstar/distributed/execution.py
-[kv]: https://github.com/rohanchanani/mstar-amd-c/blob/8ab466e2100fa464ae73f3927042fe1e7f04821b/mstar/engine/resources/kv/plan.py
-[sampler]: https://github.com/rohanchanani/mstar-amd-c/blob/8ab466e2100fa464ae73f3927042fe1e7f04821b/mstar/engine/resources/sampler/resource.py
-[positions]: https://github.com/rohanchanani/mstar-amd-c/blob/8ab466e2100fa464ae73f3927042fe1e7f04821b/mstar/engine/resources/position/manager.py
-[views]: https://github.com/rohanchanani/mstar-amd-c/blob/8ab466e2100fa464ae73f3927042fe1e7f04821b/mstar/engine/resources/sequence.py
-[platforms]: https://github.com/rohanchanani/mstar-amd-c/blob/8ab466e2100fa464ae73f3927042fe1e7f04821b/mstar/platforms/interface.py
-[qwen]: https://github.com/rohanchanani/mstar-amd-c/blob/8ab466e2100fa464ae73f3927042fe1e7f04821b/mstar/model/qwen3_omni/thinker_logical.py
-[contracts]: https://github.com/rohanchanani/mstar-amd-c/blob/8ab466e2100fa464ae73f3927042fe1e7f04821b/mstar/model/contract.py
+[binding]: https://github.com/rohanchanani/mstar-amd-c/blob/555f4845cbe878890e2fb2d5eed01dd6528a6892/mstar/model/binding.py
+[execution]: https://github.com/rohanchanani/mstar-amd-c/blob/555f4845cbe878890e2fb2d5eed01dd6528a6892/mstar/engine/execution.py
+[engine]: https://github.com/rohanchanani/mstar-amd-c/blob/555f4845cbe878890e2fb2d5eed01dd6528a6892/mstar/engine/engine.py
+[resources]: https://github.com/rohanchanani/mstar-amd-c/blob/555f4845cbe878890e2fb2d5eed01dd6528a6892/mstar/engine/resources/binding.py
+[agreement]: https://github.com/rohanchanani/mstar-amd-c/blob/555f4845cbe878890e2fb2d5eed01dd6528a6892/mstar/distributed/execution.py
+[kv]: https://github.com/rohanchanani/mstar-amd-c/blob/555f4845cbe878890e2fb2d5eed01dd6528a6892/mstar/engine/resources/kv/plan.py
+[sampler]: https://github.com/rohanchanani/mstar-amd-c/blob/555f4845cbe878890e2fb2d5eed01dd6528a6892/mstar/engine/resources/sampler/resource.py
+[positions]: https://github.com/rohanchanani/mstar-amd-c/blob/555f4845cbe878890e2fb2d5eed01dd6528a6892/mstar/engine/resources/position/manager.py
+[views]: https://github.com/rohanchanani/mstar-amd-c/blob/555f4845cbe878890e2fb2d5eed01dd6528a6892/mstar/engine/resources/sequence.py
+[platforms]: https://github.com/rohanchanani/mstar-amd-c/blob/555f4845cbe878890e2fb2d5eed01dd6528a6892/mstar/platforms/interface.py
+[qwen]: https://github.com/rohanchanani/mstar-amd-c/blob/555f4845cbe878890e2fb2d5eed01dd6528a6892/mstar/model/qwen3_omni/thinker_logical.py
+[contracts]: https://github.com/rohanchanani/mstar-amd-c/blob/555f4845cbe878890e2fb2d5eed01dd6528a6892/mstar/model/contract.py

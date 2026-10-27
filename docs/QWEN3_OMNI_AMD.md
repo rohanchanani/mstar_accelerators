@@ -10,7 +10,8 @@ and weight preparation. The audio encoder uses BF16 parameters and buffers with 
 
 ## Install and prepare
 
-Use paired `mstar` and `mstar_accelerators` checkouts on a Linux x86_64 ROCm
+Use `mstar` at [MSTAR_REVISION](../MSTAR_REVISION) alongside this
+`mstar_accelerators` checkout on a Linux x86_64 ROCm
 7.2 host with Python 3.12, Rust and a C++ compiler. The pinned dependencies and
 checkpoint manifest are in `requirements/`. The checkpoint is
 `Qwen/Qwen3-Omni-30B-A3B-Instruct`, revision
