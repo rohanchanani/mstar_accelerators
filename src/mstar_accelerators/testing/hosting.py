@@ -4,7 +4,6 @@ This host has no model names, model constructors, reference policy, tolerances,
 or case recipes. It transports a derived job to actual workers and preserves
 release/uncertainty semantics. The central model consumer owns the cases.
 """
-from datetime import timedelta
 import json
 import multiprocessing as mp
 from pathlib import Path
@@ -42,6 +41,7 @@ def groups_for(job, rank):
     from mstar.distributed.communication import CommGroup, WorkerParallelGroups
     members = list(range(job.tp_size))
     groups = WorkerParallelGroups(job.tp_size, rank, any_parallelism=job.tp_size > 1,
+                                  dist_timeout_s=180,
                                   world_parallel_groups=[tuple(members)] if job.tp_size > 1 else [])
     for node in job.nodes:
         groups.add(node, CommGroup(rank, rank, members))
@@ -72,7 +72,7 @@ class Worker:
             raise
 
     def _run(self):
-        self.parallel_groups.init_dist(self.rendezvous, self.device, timeout=timedelta(seconds=180))
+        self.parallel_groups.init_dist(self.rendezvous, self.device)
         entries = _entries(self.source, self.job)
         # The full selected corpus remains available to the centrally owned
         # trajectory constructor for compatible companion selection.
