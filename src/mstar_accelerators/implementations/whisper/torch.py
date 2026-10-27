@@ -14,6 +14,23 @@ from mstar.engine.resources.sequence import DenseSequenceView
 from mstar.model.whisper.config import ATTN, CROSS_ATTN, CROSS_KV_CACHE, KV_CACHE, POS
 
 
+def column_major_weights(binding, weights):
+    """Cache logical 2D weights in column-major storage, preserving aliases."""
+    key = (column_major_weights, id(weights))
+    if key not in binding.prepared:
+        converted, identities = {}, {}
+        for name, weight in weights.items():
+            if weight.ndim == 2:
+                identity = id(weight)
+                if identity not in identities:
+                    identities[identity] = weight.t().contiguous().t()
+                converted[name] = identities[identity]
+            else:
+                converted[name] = weight
+        binding.prepared[key] = converted
+    return binding.prepared[key]
+
+
 def linear(weights, prefix, x):
     return F.linear(x, weights[prefix + ".weight"], weights[prefix + ".bias"])
 
@@ -45,12 +62,61 @@ def attention(q, k, v, heads, *, mask=None, scale_queries=False):
     return (scores.softmax(-1) @ v).transpose(0, 1).reshape(queries, width)
 
 
+def sdpa_attention(q, k, v, heads, *, mask=None, scale_queries=False):
+    """Tiled Torch attention, selected explicitly by an implementation."""
+    queries, width = q.shape
+    keys, head_dim = k.shape[0], width // heads
+    if scale_queries:
+        q = q * head_dim ** -0.5
+    q = q.reshape(queries, heads, head_dim).transpose(0, 1)
+    k = k.reshape(keys, heads, head_dim).transpose(0, 1)
+    v = v.reshape(keys, heads, head_dim).transpose(0, 1)
+    attended = F.scaled_dot_product_attention(
+        q.unsqueeze(0), k.unsqueeze(0), v.unsqueeze(0),
+        attn_mask=None if mask is None else mask.to(dtype=q.dtype),
+        dropout_p=0.0, scale=1.0 if scale_queries else head_dim ** -0.5,
+    ).squeeze(0)
+    return attended.transpose(0, 1).reshape(queries, width)
+
+
+def sharded_greedy_readout(config, weights, group):
+    """Borrow vocabulary row intervals from the prepared weights and TP group."""
+    start = config.vocab_size * group.rank // group.world_size
+    end = config.vocab_size * (group.rank + 1) // group.world_size
+    output_weight = weights["decoder.proj_out.weight"][start:end]
+    suppressed = {
+        walk: tuple(index - start for index in config.suppressed_tokens(walk)
+                    if start <= index < end)
+        for walk in ("prefill", "decode")
+    }
+
+    def select_tokens(x, call):
+        walk = call.graph_walk
+        logits = F.linear(x, output_weight)
+        if suppressed[walk]:
+            logits[:, suppressed[walk]] = float("-inf")
+        values, indices = logits.max(dim=-1)
+        # Widen F32 maxima exactly and carry vocabulary indices in FP64. Rank
+        # order is contiguous vocabulary order, preserving first-index ties.
+        candidate = torch.stack((values.to(torch.float64),
+                                 (indices + start).to(torch.float64)), dim=-1)
+        candidates = group.all_gather(candidate, dim=0)
+        winner = candidates[:, 0].argmax(dim=0)
+        return candidates[winner, 1].to(torch.int64).reshape(1)
+
+    return select_tokens
+
+
 class WhisperTorch:
     """Retained encoder/attention math with an implementation-selected FFN."""
 
-    def __init__(self, config, weights, resources, *, ffn=None):
+    def __init__(self, config, weights, resources, *, ffn=None, encoder_attention=attention,
+                 decoder_attention=attention, token_selector=None):
         self.config, self.weights = config, weights
         self.ffn = ffn or (lambda prefix, x: feed_forward(weights, prefix, x))
+        self.encoder_attention = encoder_attention
+        self.decoder_attention = decoder_attention
+        self.token_selector = token_selector
         self.views = {key: resources[key].view(DenseSequenceView())
                       for key in (KV_CACHE, CROSS_KV_CACHE) if key in resources}
         self.dtype = next(iter(weights.values())).dtype
@@ -70,7 +136,8 @@ class WhisperTorch:
             normalized = normalize(self.weights, prefix + ".self_attn_layer_norm", x)
             q, k, v = (linear(self.weights, prefix + ".self_attn." + projection, normalized)
                        for projection in ("q_proj", "k_proj", "v_proj"))
-            attended = attention(q, k, v, self.config.encoder_attention_heads, scale_queries=True)
+            attended = self.encoder_attention(q, k, v, self.config.encoder_attention_heads,
+                                             scale_queries=True)
             x = x + linear(self.weights, prefix + ".self_attn.out_proj", attended)
             x = x + self.ffn(prefix, normalize(self.weights, prefix + ".final_layer_norm", x))
         return {"encoder_states": (normalize(self.weights, "encoder.layer_norm", x),)}
@@ -116,14 +183,16 @@ class WhisperTorch:
             write(self_write, layer, k, v)
             k, v, mask = read(self_read, layer)
             x = x + linear(self.weights, prefix + ".self_attn.out_proj",
-                           attention(q, k, v, self.config.decoder_attention_heads, mask=mask))
+                           self.decoder_attention(q, k, v, self.config.decoder_attention_heads, mask=mask))
             normalized = normalize(self.weights, prefix + ".encoder_attn_layer_norm", x)
             q = linear(self.weights, prefix + ".encoder_attn.q_proj", normalized)
             k, v, mask = read(cross_read, layer)
             x = x + linear(self.weights, prefix + ".encoder_attn.out_proj",
-                           attention(q, k, v, self.config.decoder_attention_heads, mask=mask))
+                           self.decoder_attention(q, k, v, self.config.decoder_attention_heads, mask=mask))
             x = x + self.ffn(prefix, normalize(self.weights, prefix + ".final_layer_norm", x))
         x = normalize(self.weights, "decoder.layer_norm", x)[-1:]
+        if self.token_selector is not None:
+            return {"tokens": self.token_selector(x, call)}
         logits = F.linear(x, self.weights["decoder.proj_out.weight"])
         suppressed = self.config.suppressed_tokens(call.graph_walk)
         if suppressed:

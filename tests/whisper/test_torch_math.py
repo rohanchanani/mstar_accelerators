@@ -2,6 +2,8 @@
 from types import SimpleNamespace
 
 import torch
+import pytest
+import torch.nn.functional as F
 
 from mstar.engine.execution import Execution, InvocationFacts, LogicalInvocation
 from mstar.engine.resources.runner import StepRunner
@@ -39,7 +41,8 @@ def test_fp64_encoder_preserves_fp32_output_boundary(config):
     torch.testing.assert_close(actual, expected, rtol=1e-11, atol=1e-11)
 
 
-def test_torch_decoder_uses_owned_plans_and_fp32_cache(config):
+@pytest.mark.parametrize("physical_selector", [False, True])
+def test_torch_decoder_uses_owned_plans_and_fp32_cache(config, physical_selector):
     weights = random_weights(config)
     model = WhisperModel.__new__(WhisperModel)
     model.config = config
@@ -60,7 +63,15 @@ def test_torch_decoder_uses_owned_plans_and_fp32_cache(config):
     binding = NodeBinding(model, shell, "decoder", torch.device("cpu"), torch.float32,
                           group, group, {}, specs)
     precise = prepare_weights(binding, "decoder.", dtype=torch.float64)
-    program = WhisperTorch(config, precise, resources)
+    calls = []
+    def select_tokens(hidden, call):
+        assert call.plan_results.sampler is resources[SAMPLER]._sampling_plan
+        calls.append(call.graph_walk)
+        logits = F.linear(hidden, precise["decoder.proj_out.weight"])
+        logits[:, config.suppressed_tokens(call.graph_walk)] = float("-inf")
+        return logits.argmax(-1)
+    program = WhisperTorch(config, precise, resources,
+                           token_selector=select_tokens if physical_selector else None)
     prepared = prepare_torch_programs(binding, resources,
         {walk: TorchProgram(program.decoder) for walk in ("prefill", "decode")})
     runner = StepRunner(resources)
@@ -100,5 +111,6 @@ def test_torch_decoder_uses_owned_plans_and_fp32_cache(config):
             lease.close()
             ids = actual.tokens
     assert all(torch.equal(value, expected) for value, expected in held)
+    assert calls == (["prefill", "decode", "decode", "decode", "decode"] if physical_selector else [])
     runner.remove_request(0)
     prepared.close()
