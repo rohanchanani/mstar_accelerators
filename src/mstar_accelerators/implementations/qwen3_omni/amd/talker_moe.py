@@ -205,7 +205,9 @@ class SmallTokenTalkerMoE(TritonFusedMoE):
     Unqualified operands retain its validation/behavior through the fallback.
     """
 
-    def __call__(self, x, w1, w2, weights, ids):
+    def __call__(self, x, w1, w2, weights, ids, *, skip_invalid=False):
+        if skip_invalid:
+            return super().__call__(x, w1, w2, weights, ids, skip_invalid=True)
         if (
             x.dtype == torch.bfloat16
             and w1.dtype == torch.bfloat16

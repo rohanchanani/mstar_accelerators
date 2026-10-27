@@ -104,7 +104,9 @@ def down_vector(
 class SmallTokenThinkerMoE(TritonFusedMoE):
     """gfx942 Thinker specialization; all other invocations retain the backend."""
 
-    def __call__(self, hidden_states, w1, w2, topk_weights, topk_ids):
+    def __call__(self, hidden_states, w1, w2, topk_weights, topk_ids, *, skip_invalid=False):
+        if skip_invalid:
+            return super().__call__(hidden_states, w1, w2, topk_weights, topk_ids, skip_invalid=True)
         if (
             hidden_states.dtype != torch.bfloat16
             or w1.dtype != torch.bfloat16
