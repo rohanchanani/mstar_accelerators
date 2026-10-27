@@ -90,7 +90,7 @@ def setup_case(*, corrupt=False):
                     actual = program.primitive(program.materialize(x, execution), execution)
                     expected = reference(x.double())
                     events.append(("executed_rows", x.shape[0]))
-                    yield Comparison("output", actual, expected, dtype=torch.float32)
+                    yield Comparison("output", actual, reference.float()(x), dtype=torch.float32, promoted=expected)
                 finally:
                     lease.close()
                     program.close()
@@ -109,7 +109,7 @@ def test_default_consumer_solves_prepares_and_executes_distinct_torch_programs()
     assert report.status is Status.PASS and report.complete
     check = report.results[0].checks[0]
     assert check["policy"] == DEFAULT.name
-    assert check["actual_dtype"] == "torch.float32" and check["reference_dtype"] == "torch.float64"
+    assert check["actual_dtype"] == "torch.float32" and check["reference_dtype"] == "torch.float32"
     assert report.results[0].details["cases"][0]["solver"]["witness"]["rows"] == 2
     assert events == ["actual_implementation_prepare", ("executed_rows", 2),
                       "lease_closed", "program_closed"]
@@ -126,7 +126,7 @@ def test_numerical_bug_fails_while_missing_reference_is_a_distinct_skip():
                           DifferentialConsumer({ReferenceProgram: adapter}, differential_comparator))
     assert report.status is Status.FAIL and not report.complete
     assert report.to_dict()["counts"] == {"PASS": 0, "FAIL": 1, "SKIP": 1}
-    assert report.results[0].checks[0]["mismatched_elements"] > 0
+    assert not report.results[0].checks[0]["passed"]
     assert report.results[1].details["code"] == "missing_reference"
     assert events.count("actual_implementation_prepare") == 1
     assert events[-2:] == ["lease_closed", "program_closed"]

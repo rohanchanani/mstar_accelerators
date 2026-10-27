@@ -79,6 +79,8 @@ class Comparison:
     expected: Any
     exact: bool = False
     dtype: Any = None
+    promoted: Any = None
+    suppression_mask: Any = None
 
 
 @dataclass(frozen=True)

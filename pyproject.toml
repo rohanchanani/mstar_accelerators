@@ -13,7 +13,7 @@ dependencies = ["torch>=2.9.1,<2.13.0", "PyYAML>=6"]
 mstar-accelerators = "mstar_accelerators.authoring:main"
 
 [project.optional-dependencies]
-test = ["pytest>=8.2", "transformers==4.57.3", "safetensors", "PyYAML"]
+test = ["pytest>=8.2", "transformers==4.57.3", "safetensors", "PyYAML", "more-itertools==10.8.0", "regex", "scipy"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -23,3 +23,5 @@ testpaths = ["tests"]
 
 [tool.setuptools.package-data]
 "mstar_accelerators.testing" = ["corpus_data/*/*.json", "corpus_data/*/*.wav"]
+
+"mstar_accelerators.testing._vendor.english_normalizer" = ["english.json", "LICENSE", "PROVENANCE"]

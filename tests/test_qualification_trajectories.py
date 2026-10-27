@@ -26,6 +26,8 @@ from mstar_accelerators.testing.whisper import QualificationSession
 
 @pytest.fixture
 def tiny(monkeypatch):
+    # These are CPU mechanism tests, independent of the host accelerator.
+    monkeypatch.setattr(torch.accelerator, "is_available", lambda: False)
     config = WhisperModelConfig(
         d_model=2, decoder_layers=1, decoder_attention_heads=1, decoder_ffn_dim=4,
         encoder_layers=1, encoder_attention_heads=1, encoder_ffn_dim=4,
@@ -49,6 +51,8 @@ def tiny(monkeypatch):
     monkeypatch.setattr(cases, "_resource_specs", specs)
 
     class Reference:
+        def modules(self): return ()
+
         def run(self, walk, engine, ids, states=None, *, return_logits=False):
             total = 0.0
             for key, values in ((KV_CACHE, ids.float().reshape(-1, 1).expand(-1, 2)),
@@ -57,7 +61,7 @@ def tiny(monkeypatch):
                 if values is not None:
                     resource.write_kv(values.reshape(-1, 1, 2),
                                       2 * values.reshape(-1, 1, 2), layer_idx=0)
-                view = resource.plans["main"].views[0]
+                view = engine.step.ctx.plan_results[key]["main"].views[0]
                 positions = torch.arange(view.length)
                 pages = torch.tensor(view.page_idxs)[positions // resource.kv_cache.page_size]
                 slots = positions % resource.kv_cache.page_size
@@ -70,7 +74,7 @@ def tiny(monkeypatch):
 
     def reference(self, binding, *, dtype=torch.float32):
         if binding.node_name == "audio_encoder":
-            return SimpleNamespace(run=lambda _: torch.ones(128, 2, dtype=dtype))
+            return SimpleNamespace(run=lambda _: torch.ones(128, 2, dtype=dtype), modules=lambda: ())
         return Reference()
 
     monkeypatch.setattr(cases.WhisperCaseAdapter, "_reference", reference)
@@ -128,10 +132,11 @@ def tiny(monkeypatch):
                         slots = positions % access.config.page_size
                         total += float(tensor[pages, 0, slots].sum())
                 token = (int(total) + int(wrong)) % config.vocab_size
+                logits = torch.zeros(config.vocab_size)
+                if not sampling_case["flat_logits"]:
+                    logits[token] = 1
+                token = int(logits.argmax())
                 if temperature > 0:
-                    logits = torch.zeros(config.vocab_size)
-                    if not sampling_case["flat_logits"]:
-                        logits[token] = 1
                     sampler = getattr(call.plan_results, SAMPLER)
                     if fixed_argmax:
                         token = int(logits.argmax())
@@ -158,7 +163,8 @@ def tiny(monkeypatch):
         sampling_case["flat_logits"] = flat_logits
         session = QualificationSession()
         refs = cases.adapters(model, torch.zeros(2, 256), session=session, device="cpu",
-                              corpus=entries, scope="synthetic host lifecycle mechanism")
+                              corpus=entries, scope="synthetic host lifecycle mechanism",
+                              model_config={"autocast_dtype": "float32"})
         return DifferentialConsumer(refs, differential_comparator), session
 
     return declaration, consumer, events
@@ -171,7 +177,8 @@ def test_distinct_registered_programs_share_state_and_reuse_after_backpressure(t
 
     def execute(engine, batch):
         outputs = original(engine, batch)
-        executions.append((batch.graph_walk, batch.admit_error is not None))
+        if any(option.name != "logical-reference" for option in engine.execution_capabilities(batch.node_name).options):
+            executions.append((batch.graph_walk, batch.admit_error is not None))
         return outputs
 
     monkeypatch.setattr(Engine, "exec", execute)
@@ -302,7 +309,7 @@ def test_bad_decode_remains_a_failed_registration_with_trajectory_evidence(tiny)
     result = consume("decode", entries["decode"])
     assert result.status is Status.FAIL
     assert {check["name"] for check in result.checks if not check["passed"]} >= {
-        "tokens", "trajectory.decode.tokens", "trajectory.reassigned.decode.tokens"}
+        "logits", "trajectory.decode.logits", "trajectory.reassigned.decode.logits"}
     assert result.details["trajectories"]["cases"][0]["executed"]
 
 

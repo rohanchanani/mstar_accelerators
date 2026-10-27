@@ -33,6 +33,9 @@ from mstar_accelerators.binding import invocation_facts, static_facts
 from mstar_accelerators.conditions import Constant
 from mstar_accelerators.registry import Registry
 from mstar_accelerators.testing.harness import CasePlan, Comparison, Unavailable
+from .whisper_reference import WhisperReference
+from ..graph_observations import GraphSamplingObservation
+from ..generation import GreedyOutput
 from mstar_accelerators.testing.runtime import load_engine, join_placements, execute as engine_execute
 from mstar_accelerators.testing.reference_resources.snapshot import (
     ReferencePlanConsumer,
@@ -78,8 +81,10 @@ class WhisperCaseAdapter:
     """
 
     def __init__(self, model, features, *, session, device, stream=None, corpus=None,
-                 language="en", task="transcribe", scope=None, parallel_groups=None):
+                 language="en", task="transcribe", scope=None, parallel_groups=None, model_config=None, quality=None):
         self.model, self.features, self.session = model, features, session
+        self.model_config = dict(model_config or {})
+        self.quality = quality
         self.device, self.stream = torch.device(device), stream
         self.language, self.task = language, task
         self.corpus = dict(corpus or {})
@@ -107,27 +112,32 @@ class WhisperCaseAdapter:
             sp_group = self.parallel_groups.get_sp_config_for_node(node_name)
             self.agreement = ExecutionAgreement(
                 self.parallel_groups.get_joint_group_for_node(node_name), node_name)
-        binding = NodeBinding(self.model, shell, node_name, self.device, torch.float32,
-                              tp_group, sp_group, {}, specs)
+        from ..policy import dtype_for
+        binding = NodeBinding(self.model, shell, node_name, self.device, dtype_for(self.model, self.model_config),
+                              tp_group, sp_group, self.model_config, specs)
         prompt = tuple(self.model.config.decoder_prompt_ids(self.language, self.task))
         domains = {"batch_size": (1,), "graph_walk": ("prefill",) if encoder else ("prefill", "decode")}
         if not encoder:
             domains["token_lengths"] = ((len(prompt),), (1,))
             domains["resources"] = policy_domains(acceleration.when, SAMPLER)
         facts = static_facts(binding)
+        if self.quality is not None:
+            from .whisper_quality import supported_walks, run_quality
+            quality_walks = supported_walks(acceleration, binding, self.quality)
         reference, states = None, None
         # Resolve and run the CPU reference before allocating native state or
         # preparing a physical program. A statically rejected binding needs no
         # reference construction: the common solver will diagnose that skip.
         if acceleration.when.evaluate(facts) is not Support.NO:
             if encoder:
-                states = self._reference(binding, dtype=torch.float64).run(self.features)
+                states = self._encode(binding, torch.float32)
+
             else:
                 reference = self._reference(binding)
                 encoder_shell = self.model.create_submodule("audio_encoder")
                 encoder_binding = replace(binding, submodule=encoder_shell,
                                           node_name="audio_encoder", prepared={})
-                states = self._reference(encoder_binding, dtype=torch.float64).run(self.features).float()
+                states = self._encode(encoder_binding, torch.float32)
         trajectories = {"policy": "one-compatible-prefill-per-decode-witness-v2",
                         "selection": "first distinct compatible registration by sorted name, then the decode registration's own prefill",
                         "scope": "bounded registered trajectories, not all pairs",
@@ -136,10 +146,16 @@ class WhisperCaseAdapter:
         def settle():
             if self.stream is not None:
                 self.stream.synchronize()
+            self.graph_observation.values.clear()
             self.session.close()
 
+        quality_done = False
+
         def execute(witness):
-            comparisons = self._execute(acceleration, binding, witness, prompt, reference, states)
+            nonlocal quality_done
+            self.graph_observation = GraphSamplingObservation()
+            with self.graph_observation.install():
+                comparisons = self._execute(acceleration, binding, witness, prompt, reference, states)
             # All observations now own CPU values. This is test-time settlement,
             # never a serving wait or an exception-path storage release.
             settle()
@@ -149,22 +165,28 @@ class WhisperCaseAdapter:
                 companion = self._prefill_companion(name, acceleration, binding, witness, prompt, record)
                 if companion is not None:
                     record["prefill"] = companion[0]
-                    comparisons.extend(self._execute(
+                    with self.graph_observation.install():
+                        comparisons.extend(self._execute(
                         acceleration, binding, witness, prompt, reference, states,
                         companion=companion, trajectory=record))
                     settle()
                     record["executed"] = True
+            if self.quality is not None and not quality_done:
+                with self.graph_observation.install():
+                    comparisons.append(run_quality(self, acceleration, binding, self.quality, quality_walks))
+                settle()
+                quality_done = True
             return comparisons
 
         return CasePlan(
             facts=facts, domains=domains,
             execute=execute,
-            reference=("model-owned HF encoder, CPU FP64 on logical FP32 values" if encoder else
+            reference=("model-owned HF encoder through M*, CPU FP32; lazy FP64 on numerical failure" if encoder else
                        "model-owned M* decoder, CPU FP32, exact invocation plans and independent physical state"),
             scope=self.scope,
             details={"case": "independent logical state per consumer-selected witness", "state_seed": "none" if encoder else "CPU reference",
                      "preparation": "exact registered implementation.prepare; no diagnostic replacement",
-                     "internal_logits": "not exposed or compared by this consumer",
+                     "internal_logits": "actual sampler operands; pinned PyTorch comparator with lazy FP64 reference",
                      "sampling": {"policy": "categorical-cdf-dkw-v1",
                                   "draws": len(DRAW_SEEDS), "alpha": ALPHA,
                                   "domain": "canonical greedy or positive temperature; top_k=0, top_p=1, min_p=0, repetition_penalty=1",
@@ -173,7 +195,7 @@ class WhisperCaseAdapter:
                                   "independent_decode_history": "CPU-reference prefill with argmax teacher-forcing token; this is case construction, not a stochastic draw oracle",
                                   "trajectory": "actual implementation samples teacher-force the independent reference",
                                   "scope": "bounded seeded empirical CDF; no cross-implementation identical-draw promise or arbitrary-input guarantee"},
-                     "trajectories": trajectories},
+                     "trajectories": trajectories, "quality": self.quality},
             constraints=None if encoder else _InvocationShape(len(prompt)),
         )
 
@@ -206,6 +228,13 @@ class WhisperCaseAdapter:
         peers = self.agreement.group.all_gather_object(identities)
         return [Comparison("replicated_state_and_outputs", peers,
                            [peers[0]] * len(peers), exact=True)]
+
+    def _encode(self, binding, dtype):
+        reference = self._reference(binding, dtype=dtype)
+        execution = WhisperReference(replace(binding, dtype=dtype), reference, self.session)
+        _, result = execution.invoke('prefill', 0, features=self.features)
+        execution.remove(0)
+        return result.encoder_states[0].detach().cpu().clone()
 
     def _reference(self, binding, *, dtype=torch.float32):
         shell = self.model.create_submodule(binding.node_name)
@@ -306,7 +335,7 @@ class WhisperCaseAdapter:
             actual = self._observe({"encoder": result.encoder_states[0]})["encoder"]
             engine.remove_request(0)
             return [Comparison("encoder.rows", len(result.encoder_states), 1, exact=True),
-                    Comparison("encoder", actual, states, dtype=torch.float32)]
+                    Comparison("encoder", actual, states, dtype=torch.float32, promoted=lambda: self._encode(binding, torch.float64))]
 
         placements = [assembly]
         if companion is not None and not shared_program:
@@ -316,9 +345,34 @@ class WhisperCaseAdapter:
         resources = engine._resources
         runner = engine._runner
         reference_state = ReferencePlanConsumer(resources)
-        reference_shell = self.model.create_submodule("decoder")
-        reference_shell.reference_program = reference
-        reference_shell.bind_node_resources(reference_state.resources)
+        specs = tuple(replace(spec, config=resources[spec.resource_key].config)
+                      if spec.resource_key in (KV_CACHE, CROSS_KV_CACHE) else spec
+                      for spec in binding.resource_specs)
+        ordinary = WhisperReference(binding, reference, self.session, specs=specs)
+        history, higher_values = [], None
+        def remove(rid):
+            engine.remove_request(rid)
+            if rid in ordinary.active:
+                history.append(('remove', rid))
+            ordinary.remove(rid)
+
+        def higher(index, key):
+            nonlocal higher_values
+            if higher_values is None:
+                precise = WhisperReference(replace(binding, dtype=torch.float64),
+                    self._reference(binding, dtype=torch.float64), self.session, specs=specs)
+                higher_values = {}
+                for i, event in enumerate(history):
+                    if event[0] == 'remove':
+                        precise.remove(event[1])
+                        continue
+                    _, rid, selected_walk, ids, encoder_states = event
+                    batch, _ = precise.invoke(selected_walk, rid, ids, encoder_states)
+                    plans = batch.step_context.plan_results
+                    higher_values[i] = {'logits': precise.logits.detach().cpu().clone(),
+                        **{key: precise.resources[key].kv_cache.tensor[:, list(live_pages(plans, key, rid))].detach().clone()
+                           for key in (KV_CACHE, CROSS_KV_CACHE)}}
+            return higher_values[index][key]
         if companion is not None:
             trajectory["resolved_resources"] = {
                 key: {"layout": "contiguous" if getattr(resources[key].config, "dense", False) else "paged",
@@ -344,7 +398,6 @@ class WhisperCaseAdapter:
             with self._executing():
                 plans = runner.plan(step)
                 self._complete()
-            reference_state.use(plans)
             native_engine = ModelInputsFromEngine([rid], {}, resources, step=step)
             reference_engine = ModelInputsFromEngine([rid], {}, reference_state.resources, step=step)
             invocation = LogicalInvocation(selected_walk, [rid], [logical], native_engine, plans,
@@ -360,28 +413,33 @@ class WhisperCaseAdapter:
         seed_holders = []
         self.session.retained.append(seed_holders)
 
-        def reference_logits(rid, selected_walk, engine, plans, ids, encoder_states, *, reuse=False):
-            # Distribution trials repeat the same logical inputs and state.
-            # Cache reference math once, relocating its physical copy through
-            # each fresh runtime plan rather than assuming stable page numbers.
+        def reference_logits(rid, selected_walk, unused_engine, plans, ids, encoder_states, *, reuse=False):
             if reuse and selected_walk in reference_cases:
-                logits, saved = reference_cases[selected_walk]
                 for key in (KV_CACHE, CROSS_KV_CACHE):
                     tensor = reference_state.resources[key].kv_cache.tensor
                     tensor.zero_()
-                    tensor[:, list(live_pages(plans, key, rid))] = saved[key]
-                return logits
-            logits = reference.run(selected_walk, engine, ids, encoder_states, return_logits=True)
-            if reuse:
-                reference_cases[selected_walk] = (logits, {
-                    key: reference_state.resources[key].kv_cache.tensor[
-                        :, list(live_pages(plans, key, rid))].clone()
-                    for key in (KV_CACHE, CROSS_KV_CACHE)
-                })
-            return logits
+                    tensor[:, list(live_pages(plans, key, rid))] = reference_cases[selected_walk][1][key].to(tensor.dtype)
+                return reference_cases[selected_walk][0]
+            ids = self._observe({'ids': ids})['ids'] if ids.device.type != 'cpu' else ids.detach().clone()
+            index = len(history)
+            history.append(('step', rid, selected_walk, ids, encoder_states))
+            batch, _ = ordinary.invoke(selected_walk, rid, ids, encoder_states)
+            ref_plans = batch.step_context.plan_results
+            saved = {}
+            for key in (KV_CACHE, CROSS_KV_CACHE):
+                source_pages = list(live_pages(ref_plans, key, rid))
+                target_pages = list(live_pages(plans, key, rid))
+                saved[key] = ordinary.resources[key].kv_cache.tensor[:, source_pages].detach().clone()
+                # This snapshot represents the candidate's declared physical
+                # storage encoding; independent reference computation stays FP32.
+                snapshot = reference_state.resources[key].kv_cache.tensor
+                snapshot[:, target_pages] = saved[key].to(snapshot.dtype)
+            reference_cases[selected_walk] = (ordinary.logits.detach().cpu().clone(), saved, index)
+            return reference_cases[selected_walk][0]
 
         def run_step(rid, selected_walk, ids, declaration, *, prefix="",
                      reuse_reference=False, sample_only=False):
+            nonlocal actual_distribution_logits
             encoder_states = states if selected_walk == "prefill" else None
             self._check_when(declaration, binding, {}, selected_walk, (ids.numel(),),
                              policies={SAMPLER: resources[SAMPLER].policy_facts([rid])})
@@ -390,10 +448,13 @@ class WhisperCaseAdapter:
             # Immutability compares implementation state with its own snapshot;
             # accuracy against independent reference state remains numerical.
             cross_before = None
+            self_before = None
             if selected_walk == "decode" and not sample_only:
-                cross_before = self._observe({
+                prior = self._observe({
                     CROSS_KV_CACHE: resources[CROSS_KV_CACHE].kv_cache.tensor,
-                })[CROSS_KV_CACHE]
+                    KV_CACHE: resources[KV_CACHE].kv_cache.tensor,
+                })
+                cross_before, self_before = prior[CROSS_KV_CACHE], prior[KV_CACHE]
             def observe(result, invocation):
                 return (resources[POS].position(rid, "main"),
                         resources[SAMPLER]._sampler._step_offset[rid])
@@ -401,12 +462,12 @@ class WhisperCaseAdapter:
             raw = {"text_inputs": [ids]}
             if encoder_states is not None:
                 raw["encoder_states"] = [encoder_states]
-            batch, observations = engine_execute(engine, binding.node_name, selected_walk, rid,
-                                                   raw, observe=observe)
+            with self.graph_observation.capture_torch(self.model.config.vocab_size):
+                batch, observations = engine_execute(engine, binding.node_name, selected_walk, rid,
+                                                       raw, observe=observe)
             if batch.admit_error is not None:
                 raise RuntimeError(f"qualification admission failed: {batch.admit_error}")
             result, invocation, primitive_state = observations[0]
-            reference_state.use(invocation.plan_results)
             reference_engine = ModelInputsFromEngine([rid], {}, reference_state.resources,
                                                     step=invocation.engine_inputs.step)
             cloned = result.tokens.clone()
@@ -414,8 +475,15 @@ class WhisperCaseAdapter:
             expected_logits = (reference_cases[selected_walk][0] if sample_only else reference_logits(
                 rid, selected_walk, reference_engine, invocation.plan_results, ids, encoder_states,
                 reuse=reuse_reference))
-            expected_tokens = (expected_logits.argmax(dim=-1) if config.temperature == 0 else
-                               CategoricalSupport(expected_logits))
+            actual_logits = None
+            if self.graph_observation.values:
+                actual_logits = self._observe({'logits': self.graph_observation.values[-1]})['logits'].reshape_as(expected_logits)
+            # A returned token alone cannot qualify the floating computation.
+            if actual_logits is None:
+                raise RuntimeError("no observation of the executed primitive's sampling input")
+            actual_distribution_logits = actual_logits
+            expected_tokens = (actual_logits.argmax(dim=-1) if config.temperature == 0 else
+                               CategoricalSupport(actual_logits))
             observed = self._observe({"tokens": result.tokens, "clone": cloned, **({} if sample_only else {
                 KV_CACHE: resources[KV_CACHE].kv_cache.tensor,
                 CROSS_KV_CACHE: resources[CROSS_KV_CACHE].kv_cache.tensor})})
@@ -434,6 +502,10 @@ class WhisperCaseAdapter:
                                  before_position, exact=True),
                       Comparison("primitive.sampling_unchanged", primitive_state[1],
                                  before_sampling, exact=True)]
+            mask = torch.zeros_like(expected_logits, dtype=torch.bool)
+            mask[:, self.model.config.suppressed_tokens(selected_walk)] = True
+            checks.append(Comparison("logits", actual_logits, expected_logits,
+                                     promoted=lambda index=reference_cases[selected_walk][2]: higher(index, 'logits'), suppression_mask=mask))
             checks.extend(self._replica_checks(observed))
             pages = {}
             for key in (KV_CACHE, CROSS_KV_CACHE):
@@ -445,7 +517,8 @@ class WhisperCaseAdapter:
                 # without treating deliberately poisoned free storage as state.
                 columns = list(pages[key])
                 checks.append(Comparison(key, observed[key][:, columns],
-                                         reference_state.resources[key].kv_cache.tensor[:, columns]))
+                                         reference_state.resources[key].kv_cache.tensor[:, columns].clone(),
+                                         promoted=lambda index=reference_cases[selected_walk][2], key=key: higher(index, key)))
                 sink = observed[key][:, 0]
                 checks.append(Comparison(key + ".sink", sink, torch.zeros_like(sink), exact=True))
             if selected_walk == "decode" and not sample_only:
@@ -453,6 +526,21 @@ class WhisperCaseAdapter:
                 checks.append(Comparison("decode.cross_state_unchanged",
                                          observed[CROSS_KV_CACHE][:, columns],
                                          cross_before[:, columns], exact=True))
+            if selected_walk == "decode" and not sample_only:
+                # Appending a token must preserve this request's committed prefix,
+                # independently of its deliberately approximate storage precision.
+                page_size = resources[KV_CACHE].config.page_size
+                page_ids, offsets = [], []
+                for use in invocation.plan_results[KV_CACHE].values():
+                    for view in use.views:
+                        if view.request_id != rid:
+                            continue
+                        for position in range(view.start, view.start + view.length - view.to_compute):
+                            page_ids.append(view.page_idxs[position // page_size])
+                            offsets.append(position % page_size)
+                checks.append(Comparison("decode.self_prefix_unchanged",
+                                         observed[KV_CACHE][:, page_ids, :, offsets],
+                                         self_before[:, page_ids, :, offsets], exact=True))
             # Engine has already adapted the result and committed the declared effects.
             checks.extend((Comparison("commit.position", resources[POS].position(rid, "main"),
                                       before_position + ids.numel(), exact=True),
@@ -481,6 +569,7 @@ class WhisperCaseAdapter:
             runner.commit(seed_step)
             return seed_ids
 
+        actual_distribution_logits = None
         ids = torch.tensor(prompt, dtype=torch.long)
         ingest(0)
         if companion is None:
@@ -488,7 +577,7 @@ class WhisperCaseAdapter:
                 ids = seed_decode(0)
             checks, _, first_sample, _ = run_step(
                 0, walk, ids, acceleration, reuse_reference=True)
-            engine.remove_request(0)
+            remove(0)
             if config.temperature > 0:
                 samples = [first_sample]
                 for index, seed in enumerate((*DRAW_SEEDS[1:], DRAW_SEEDS[0]), 1):
@@ -501,13 +590,13 @@ class WhisperCaseAdapter:
                         0, walk, ids, acceleration,
                         prefix=f"sampling.draw{index}.", reuse_reference=True, sample_only=True)
                     checks.extend(more)
-                    engine.remove_request(0)
+                    remove(0)
                     if index < len(DRAW_SEEDS):
                         samples.append(sampled)
                     else:
                         checks.append(Comparison("sampling.seeded_replay", sampled, first_sample, exact=True))
                 checks.append(Comparison("sampling.distribution", torch.cat(samples),
-                                         CategoricalDistribution(reference_cases[walk][0], config.temperature)))
+                                         CategoricalDistribution(actual_distribution_logits, config.temperature)))
         else:
             def transition(rid, label):
                 prefill_checks, output, expected, pages = run_step(
@@ -533,6 +622,7 @@ class WhisperCaseAdapter:
                 ingest(1)
                 more, _, _, second_pages = transition(1, "trajectory.second.")
                 checks.extend(more)
+                survivor_reference_index = reference_cases["decode"][2]
                 survivor_before = self._observe({
                     key: resources[key].kv_cache.tensor for key in second_pages})
                 survivor_position = resources[POS].position(1, "main")
@@ -548,8 +638,8 @@ class WhisperCaseAdapter:
                 if observations:
                     raise RuntimeError("backpressured request unexpectedly executed")
                 # No plan/submission is performed by this failed proposal.
-                engine.remove_request(2)
-                engine.remove_request(0)
+                remove(2)
+                remove(0)
                 for key, pages in first_pages.items():
                     for layer in resources[key].kv_cache.tensor:
                         for page in pages:
@@ -572,17 +662,18 @@ class WhisperCaseAdapter:
                                              survivor_before[key][:, list(pages)], exact=True))
                     checks.append(Comparison("trajectory.other_request_accuracy." + key,
                                              observed[key][:, list(pages)],
-                                             reference_state.resources[key].kv_cache.tensor[:, list(pages)]))
+                                             reference_state.resources[key].kv_cache.tensor[:, list(pages)],
+                                             promoted=lambda index=survivor_reference_index, key=key: higher(index, key)))
                 checks.extend((
                     Comparison("trajectory.other_request_preserved.position",
                                resources[POS].position(1, "main"), survivor_position, exact=True),
                     Comparison("trajectory.other_request_preserved.sampling",
                                resources[SAMPLER]._sampler._step_offset[1], survivor_sampling, exact=True),
                 ))
-                engine.remove_request(1)
-                engine.remove_request(2)
+                remove(1)
+                remove(2)
             else:
-                engine.remove_request(0)
+                remove(0)
         for key in (KV_CACHE, CROSS_KV_CACHE):
             checks.append(Comparison(("trajectory." if companion else "") + key + ".cleanup_pages",
                                      resources[key]._arena.num_free,

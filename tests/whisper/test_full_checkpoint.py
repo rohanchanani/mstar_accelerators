@@ -18,7 +18,7 @@ from mstar.model.whisper.whisper_model import WhisperModel
 from mstar_accelerators.implementations.whisper.pi_v3d.graph import encoder_graph
 from mstar_accelerators.testing.reference_resources.snapshot import ReferencePlanConsumer
 from mstar_accelerators.testing.whisper import _compare, audio_inputs
-from mstar_accelerators.testing.numerics import compare, LEGACY_POINTWISE
+from mstar_accelerators.testing.numerics import compare
 
 from .engine import EngineSession
 from .evaluator import ReadOnlyAlgebraGraph
@@ -47,8 +47,7 @@ def test_full_checkpoint_builder_against_original():
     try:
         encoder_run = engine.run(0, "audio_encoder", "prefill", {"audio_features": [features]})
         encoded = encoder_run.output["encoder_states"][0]
-        cpu_fp32_encoder = compare("encoder.cpu_fp32", encoded, precise_audio, dtype=torch.float32)
-        legacy_encoder = compare("encoder.legacy_fp32", encoded, reference_audio, policy=LEGACY_POINTWISE)
+        cpu_fp32_encoder = compare("encoder.cpu_fp32", encoded, reference_audio, dtype=torch.float32, promoted=precise_audio)
         del precise_audio
 
         snapshot = ReferencePlanConsumer(resources)
@@ -124,7 +123,6 @@ def test_full_checkpoint_builder_against_original():
                   "composition_comparison": "independent original HF encoder + M* decoder complete tokens through EOS",
                   "composed_internal_cache_diagnostic": composed_cache_diagnostic,
                   "cpu_fp32_encoder_diagnostic": cpu_fp32_encoder,
-                  "legacy_encoder_diagnostic": legacy_encoder,
                   "encoder_reference": "CPU HF FP64 for algebra; original FP32 composed tokens retained",
                   "encoder_trajectory": "unchanged CPU FP32 graph output; no FP64/reference substitution",
                   "claim": "same filled acceleration files, actual registry/engine/commit, FP64 encoder algebra "

@@ -1,7 +1,9 @@
 """Central categorical qualification policy, independent of an RNG algorithm.
 
-These bounded observations compare actual registered draws with probabilities
-from the model-owned reference. They do not prescribe Philox, FlashInfer, or
+These bounded observations compare actual registered draws with the probability
+model supplied by the central case constructor. Whisper supplies its candidate's
+observed logits to check sampling; separate numerical comparisons check those
+logits against the independent logical reference. They do not prescribe Philox, FlashInfer, or
 matching individual draws across different sampling implementations. The fixed
 seed set makes receipts reproducible; the DKW threshold is a nominal calibration
 for independent categorical draws, not a proof about a pseudorandom generator

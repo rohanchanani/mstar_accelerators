@@ -1,0 +1,6 @@
+OpenAI Whisper EnglishTextNormalizer, unmodified.
+Source: https://github.com/openai/whisper/tree/86098128c0b4f24f0e2aa2994de830614b474227/whisper/normalizers
+Revision: 86098128c0b4f24f0e2aa2994de830614b474227
+MIT license, see LICENSE.
+Copied from the independently frozen public-baseline evaluation scorer.
+english.json equals the pinned openai/whisper-tiny normalizer.json mapping.

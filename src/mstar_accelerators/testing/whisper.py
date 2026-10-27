@@ -96,7 +96,7 @@ class QualificationSession:
             engine.shutdown()
         self.engines.clear()
         for assembly in self.assemblies:
-            if assembly.close is not None:
+            if getattr(assembly, "close", None) is not None:
                 assembly.close()
         self.assemblies.clear()
         for program in reversed(self.prepared):

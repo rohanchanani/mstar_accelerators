@@ -25,8 +25,8 @@ class _Cursor:
 
 
 class _KV(_Cursor):
-    def __init__(self, config):
-        self.kv_cache = KVCache(config, torch.device("cpu"), torch.float32)
+    def __init__(self, config, dtype=torch.float32):
+        self.kv_cache = KVCache(config, torch.device("cpu"), dtype)
         self.plans = None
 
     def layer_view(self):
@@ -64,10 +64,10 @@ class _Sampler:
 
 
 class ReferencePlanConsumer:
-    def __init__(self, runtime_resources):
+    def __init__(self, runtime_resources, dtype=torch.float32):
         self.resources = {
-            KV_CACHE: _KV(runtime_resources[KV_CACHE].config),
-            CROSS_KV_CACHE: _KV(runtime_resources[CROSS_KV_CACHE].config),
+            KV_CACHE: _KV(runtime_resources[KV_CACHE].config, dtype),
+            CROSS_KV_CACHE: _KV(runtime_resources[CROSS_KV_CACHE].config, dtype),
             ATTN: _Attention(), CROSS_ATTN: _Attention(),
             POS: _Positions(), SAMPLER: _Sampler(),
         }

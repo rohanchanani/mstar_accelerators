@@ -21,8 +21,9 @@ from mstar_accelerators.compiler import bind_tensor_result
 from mstar_accelerators.registry import Registry
 from mstar_accelerators.testing.harness import CasePlan, Comparison
 from ..policy import QWEN_BATCHES
-from ..generation import HiddenStates, GreedyOutput
+from ..generation import GreedyOutput
 from ..observations import SamplerObservation
+from .qwen_node_reference import NodeReference
 
 
 class NodeCaseAdapter:
@@ -41,9 +42,9 @@ class NodeCaseAdapter:
         static = static_facts(binding)
         batches = QWEN_BATCHES if self.node == 'Thinker' else (1,)
         details = {'finite_domain_only': True, 'timings': [],
-                   'reference': 'retained MStar model reference through the ordinary engine',
+                   'reference': 'stock HF arithmetic through the ordinary M* engine',
                    'cases': 'fixed seeded text, media and mixed walks; logical result/state comparison',
-                   'numerics': 'same BF16 reference; reciprocal top-5 generation and per-token hidden cosine/norm',
+                   'numerics': 'pinned PyTorch comparator; BF16 eager and CPU FP64 references through M*',
                    'observations': 'sampler input/output clones; instrumented correctness runs, not performance evidence'}
         cache = None
 
@@ -52,6 +53,12 @@ class NodeCaseAdapter:
             if cache is None:
                 reference = self._run(None, batches, details)
                 actual = self._run((name, acceleration), batches, details)
+                promoted_values = None
+                def higher(key, field):
+                    nonlocal promoted_values
+                    if promoted_values is None:
+                        promoted_values = self._run(None, batches, details, promoted=True)
+                    return promoted_values[key][field]
                 cache = defaultdict(list)
                 for key, expected in reference.items():
                     walk, label = key
@@ -82,35 +89,45 @@ class NodeCaseAdapter:
                                            expected['sampled_token'].reshape(wanted.shape).to(torch.long), exact=True),
                                 Comparison(label + '/generation',
                                            GreedyOutput(observed['sampled_logits'], int(got)),
-                                           GreedyOutput(expected['sampled_logits'], int(wanted))),
+                                           GreedyOutput(expected['sampled_logits'], int(wanted)),
+                                           promoted=lambda key=key: higher(key, 'sampled_logits')),
                             ))
                             continue
                         cache[walk].append(Comparison(label + '/' + field, got,
-                            HiddenStates(wanted) if field == 'thinker_states' else wanted,
+                            wanted,
                             exact=not isinstance(wanted, torch.Tensor) or not wanted.is_floating_point(),
-                            dtype=wanted.dtype if isinstance(wanted, torch.Tensor) else None))
+                            dtype=wanted.dtype if isinstance(wanted, torch.Tensor) else None,
+                            promoted=(lambda key=key, field=field: higher(key, field)) if isinstance(wanted, torch.Tensor) and wanted.is_floating_point() else None))
             # A declaration may accept every walk without an explicit Or. Its
             # single solved alternative must still compare every executed case.
             return [comparison for comparisons in cache.values() for comparison in comparisons]
 
         return CasePlan(static, {'graph_walk': self.walks, 'batch_size': batches}, execute,
-                        'retained model reference', 'actual registry execution and resource lifecycle', details)
+                        'stock HF reference through M*', 'actual registry execution and resource lifecycle', details)
 
     @torch.no_grad()
-    def _run(self, candidate, batches, details):
+    def _run(self, candidate, batches, details, *, promoted=False):
         config = {'max_concurrent_requests': max(batches), 'autocast_dtype': 'bfloat16',
                   'resources': {THINKER_KV: {'max_bytes': 3 * 1024**3, 'prefix_cache': False}},
                   'runtime_extension': {'nodes': [self.node] if candidate else []}}
-        registry = None if candidate is None else Registry({candidate[0]: candidate[1]})
-        manager = EngineManager()
-        self.session.managers.append(manager)
-        manager.load({self.node}, self.device, config, WorkerParallelGroups(1, 0), None,
-                     self.model, None, runtime_extension=None if registry is None else
-                     SimpleNamespace(assemble=registry.assemble))
-        engine = manager.engine
+        if candidate is None:
+            reference = NodeReference(self.model, self.node, self.session,
+                'cpu' if promoted else self.device, torch.float64 if promoted else self.dtype, self.walks)
+            manager = reference.execution
+            engine = manager.engine
+            details.setdefault('reference_executions', []).append({
+                'dtype': str(reference.dtype), **reference.placement})
+        else:
+            registry = Registry({candidate[0]: candidate[1]})
+            manager = EngineManager()
+            self.session.managers.append(manager)
+            manager.load({self.node}, self.device, config, WorkerParallelGroups(1, 0), None,
+                         self.model, None, runtime_extension=SimpleNamespace(assemble=registry.assemble))
+            engine = manager.engine
         resources = engine._submodules[self.node].resources
         observation = SamplerObservation(resources[THINKER_SAMPLER]) if self.node == 'Thinker' else None
-        manager.warmup_all()
+        if candidate is not None:
+            manager.warmup_all()
         validate = None
         if candidate is not None:
             option = engine.execution_capabilities(self.node).options[0]
@@ -150,6 +167,9 @@ class NodeCaseAdapter:
                             'image_grid_thw': [torch.tensor([[1, 4, 4]], device=self.device)],
                             'deepstack': [torch.randn(4, h, generator=rng).to(self.device, self.dtype)
                                           for _ in self.model.config.vision.deepstack_visual_indexes]}
+                if candidate is None:
+                    from torch.utils._pytree import tree_map
+                    raw = tree_map(lambda x: x.to(reference.device) if isinstance(x, torch.Tensor) else x, raw)
                 context = StepContext(rids, walk, 0, False,
                     request_walks={rid: info.graph_walk for rid, info in infos.items()}
                     if walk == 'thinker_mixed' else {})
@@ -206,8 +226,13 @@ class NodeCaseAdapter:
                 manager.remove_request(rid)
         if observation is not None:
             observation.close()
-        manager.shutdown()
-        self.session.managers.remove(manager)
+        if candidate is not None:
+            manager.shutdown()
+            self.session.managers.remove(manager)
+        else:
+            engine.shutdown()
+            self.session.engines.remove(engine)
+            del reference
         self.model._submodule_cache.clear()
         del manager, engine, resources
         gc.collect()

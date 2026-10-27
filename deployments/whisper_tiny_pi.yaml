@@ -4,6 +4,9 @@ model_kwargs:
   model_path_hf: REPLACE_WITH_VERIFIED_LOCAL_CHECKPOINT
 device_type: mstar_pi
 autocast_dtype: float32
+fidelity:
+  mode: quality
+  at_least: public-q8-kleidiai-v1
 max_seq_len: 448
 max_concurrent_requests: 2
 preprocess_torch_threads: 1

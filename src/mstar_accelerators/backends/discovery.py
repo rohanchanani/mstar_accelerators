@@ -51,9 +51,18 @@ class Environment:
 def discover():
     import torch
     gloo = torch.distributed.is_available() and torch.distributed.is_gloo_available()
+    cpu_options = {}
+    library = os.environ.get('MSTAR_CPU_GGML_LIBRARY')
+    if library:
+        from pathlib import Path
+        import hashlib
+        path = Path(library).resolve(strict=True)
+        with path.open('rb') as artifact:
+            digest = hashlib.file_digest(artifact, 'sha256').hexdigest()
+        cpu_options['cpu_ggml'] = {'library': str(path), 'sha256': digest}
     result = [Environment('cpu', 'cpu', 'cpu', 'cpu', os.cpu_count() or 1,
                           'gloo' if gloo else None,
-                          'mstar_accelerators.backends.torch.runtime:TorchRuntime', host_threads=1)]
+                          'mstar_accelerators.backends.torch.runtime:TorchRuntime', host_threads=1, runtime_options=cpu_options)]
     if torch.cuda.is_available():
         for index in range(torch.cuda.device_count()):
             props = torch.cuda.get_device_properties(index)

@@ -31,6 +31,7 @@ class HuggingFaceTalkerOracle(TalkerOracle):
             ("talker.code_predictor.model", Qwen3OmniMoeTalkerCodePredictorModel, hf.code_predictor_config),
         ):
             config._attn_implementation = "eager"
+            config._experts_implementation = "eager"
             with torch.device("meta"):
                 module = cls(config)
             values = {}

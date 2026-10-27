@@ -46,6 +46,10 @@ class Model:
 class Case:
     key: str = 'model'
 
+    @property
+    def deployment_config(self):
+        return {}
+
     def identity(self):
         return {'model': self.key, 'revision': 'pinned'}
 

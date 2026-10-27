@@ -66,6 +66,8 @@ class Worker:
         try:
             self._run()
         except BaseException:
+            import traceback
+            traceback.print_exc()
             self.parallel_groups.mark_failed()
             raise
 
@@ -83,7 +85,9 @@ class Worker:
         try:
             self.session, consumer, identity = policy.context(model,
                 fixtures=self.fixtures, device=self.device, entries=corpus,
-                stream=self.job.environment.stream(self.device), parallel_groups=self.parallel_groups)
+                stream=self.job.environment.stream(self.device), parallel_groups=self.parallel_groups,
+                model_config={**self.job.case.deployment_config, 'runtime_extension': self.job.environment.runtime_options},
+                model_identity=self.job.case.identity())
         except Unavailable as exc:
             self.record['report'] = run_registry(entries, lambda name, acceleration: Result(
                 name, Status.SKIP, str(exc), details={'code': exc.code, 'executed': False})).to_dict()

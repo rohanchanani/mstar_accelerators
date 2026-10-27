@@ -158,7 +158,7 @@ def test_registered_implementation_chooses_provider_through_the_actual_reference
         {"audio_features": [features]}, {"scope": "synthetic host fixture"},
     ))
     monkeypatch.setattr(WhisperEncoderSubmodule, "make_reference_program", lambda self, binding:
-                        SimpleNamespace(run=lambda value: expected.to(dtype=binding.dtype)))
+                        SimpleNamespace(run=lambda value: expected.to(dtype=binding.dtype), modules=lambda: ()))
     backend = ModuleType("mstar_pi")
     def synchronize():
         raise RuntimeError("case completion is uncertain")
@@ -203,8 +203,8 @@ def test_registered_implementation_chooses_provider_through_the_actual_reference
     monkeypatch.setattr(pi, "load_accelerations", lambda source: {"encoder": acceleration})
     record = {"results": [], "active": None}
     from mstar_accelerators.testing.planning import Job
-    case = SimpleNamespace(describe=lambda checkpoint: model)
-    environment = SimpleNamespace(stream=backend.current_stream)
+    case = SimpleNamespace(describe=lambda checkpoint: model, deployment_config={"autocast_dtype": "float32"}, identity=lambda: {})
+    environment = SimpleNamespace(stream=backend.current_stream, runtime_options={})
     job = Job(case, environment, 1, ('audio_encoder',), ('encoder',), ())
     worker = pi.Worker(worker_id="controller-test", device=torch.device('cpu'),
         runtime_extension=SimpleNamespace(drain=lambda: calls.append("drain")),
@@ -213,7 +213,8 @@ def test_registered_implementation_chooses_provider_through_the_actual_reference
     if settlement_failure:
         with pytest.raises(RuntimeError, match="completion is uncertain"):
             worker.run()
-        assert len(worker.session.engines) == 1 and worker.session.bindings
+        # Both independent reference and candidate engines remain rooted until drain.
+        assert len(worker.session.engines) == 2 and worker.session.bindings
         assert calls == ["explicit provider preparation", "fake provider submission", "lease close"]
         # Simulate the existing owner's later successful drain. The failed case
         # itself did not drop roots, publish evidence, or submit another case.
@@ -223,7 +224,7 @@ def test_registered_implementation_chooses_provider_through_the_actual_reference
         return
     worker.run()
     report = record["report"]
-    assert report["status"] == "PASS" and report["complete"]
+    assert report["status"] == "PASS" and report["complete"], [c for a in report["accelerations"] for c in a["checks"] if not c["passed"]]
     result = report["accelerations"][0]
     assert result["details"]["executed"] and result["details"]["cases"][0]["solver"]["status"] == "SAT"
     assert calls == ["explicit provider preparation", "fake provider submission", "lease close",

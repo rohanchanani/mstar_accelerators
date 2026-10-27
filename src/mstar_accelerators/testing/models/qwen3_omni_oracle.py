@@ -157,7 +157,7 @@ class TalkerOracle:
         return inputs.input_embeds.detach().to(device=self.device, dtype=self.dtype) + self._project(raw, "text")
 
     @torch.no_grad()
-    def step(self, walk, request_id, inputs, *, repetition_penalty=1.0, teacher_codes=None) -> OracleStep:
+    def step(self, walk, request_id, inputs, *, repetition_penalty=1.0, teacher_codes=None, sample=None) -> OracleStep:
         if walk not in ("talker_prefill", "talker_last_prefill", "talker_decode"):
             raise ValueError(f"Unknown logical Talker walk: {walk}")
         if repetition_penalty <= 0:
@@ -186,7 +186,8 @@ class TalkerOracle:
         if teacher is not None and teacher.numel() != groups:
             raise ValueError(f"teacher_codes must have {groups} entries")
         codes = torch.empty(groups, dtype=torch.long, device=self.device)
-        codes[0] = logits.argmax() if teacher is None else teacher[0]
+        sampled = logits.argmax() if sample is None else sample(logits, 0)
+        codes[0] = sampled if teacher is None else teacher[0]
         embedding = F.embedding(codes[:1], self.weights["talker.model.codec_embedding.weight"])
         accumulator = embedding.float().clone()
         depth_kv = [None] * cp.num_hidden_layers
@@ -196,7 +197,8 @@ class TalkerOracle:
             depth_hidden = self._backbone(embedding, "talker.code_predictor.model", cp, depth_kv, group, moe=False)
             candidate_logits = self._linear(depth_hidden, f"talker.code_predictor.lm_head.{group - 1}")[0]
             depth_logits.append(candidate_logits)
-            codes[group] = candidate_logits.argmax() if teacher is None else teacher[group]
+            sampled = candidate_logits.argmax() if sample is None else sample(candidate_logits, group)
+            codes[group] = sampled if teacher is None else teacher[group]
             embedding = F.embedding(codes[group:group + 1],
                                     self.weights[f"talker.code_predictor.model.codec_embedding.{group - 1}.weight"])
             accumulator.add_(embedding.float())

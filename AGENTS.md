@@ -20,18 +20,17 @@ weaken a fixture, tolerance, ownership rule, failure status or unsupported-domai
 rejection. A repair requiring a different core ownership contract or an
 unverified hardware capability must be brought back with a concrete reproducer.
 
-Qualification policy belongs to this optimization platform. The user explicitly
-authorized the centralized registry harness and delegated numerical policy;
-this delivery defines component-rms-v1. This supersedes the historical requirement
-to keep the first Whisper pointwise comparator as the acceptance rule; keep its
-old FAIL receipts and named diagnostic intact. Do not silently tune per-fixture
-thresholds or reinterpret old evidence. Exact state/lifetime assertions and the backend's original
-transfer/linear/graph conformance gates are unchanged. Qwen's centralized
-`registry-differential-v2` gate uses matched-precision references and reciprocal
-top-five generation choices, with exact own-sampler argmax, token collection and
-state accounting. Do not restore cross-precision exact generated-token identity
-or treat internal KV numerical diagnostics as whole-node acceptance. See
-`docs/QUALIFICATION.md` for the separately justified policy and its limitations.
+Qualification policy belongs to this optimization platform. The user approved
+a layered ordinary inference-model validation contract: one pinned PyTorch
+Dynamo numerical comparator for floating outputs, centrally fixed generation
+comparisons and reference speech continuations, and exact semantic safeguards.
+Both reference and acceleration execute through M*. Do not reintroduce
+component-RMS, cosine, migration-specific acceptance, or optimizer-authored
+testing policy. The central generated-output policy is distinct from full-node
+numerical equivalence; preserve numerical failures as diagnostics and never
+claim generation-quality PASS establishes the former raw-logit requirement. Preserve historical failures. Runtime-owned
+state, lifetime, sampling effects and backend conformance remain strict.
+See `docs/QUALIFICATION.md` for the numerical contract and its scope.
 Missing executable references or unavailable target environments are diagnosed
 SKIP, never manufactured PASS. Actual bugs and execution failures are not
 reclassified as reference unavailability. Serving consumes no test verdict.
@@ -86,6 +85,13 @@ qualification consumer together.
 
 ## Centralized acceleration qualification
 
+Qualification answers whether an acceleration implements its logical reference's
+semantic contract when executed through M*. The same centrally owned cases and
+acceptance policy apply regardless of who wrote it, whether it was migrated or
+rewritten, or whether it matches a historical winner. Provenance may be recorded
+for reproducibility, but must not create acceptance exceptions, alternate
+migration verdicts, source-identity gates, or evidence-review prerequisites.
+
 The qualification harness consumes every acceleration and returns one PASS,
 FAIL or SKIP per registration. Sampling, reference interpretation and numerical
 policy belong to its centralized consumers. Do not add per-acceleration test
@@ -104,3 +110,13 @@ Before launching a run, state the concrete unanswered question, the relevant own
 While a job runs, continue tracing the relevant source and assessing results already available. Assess partial and completed results immediately, even if other jobs are still running; update the hypothesis and next action from that evidence. Do not make launch-wait-poll the investigation workflow, and do not treat a running test as permission to stop thinking. Do not launch additional tests merely to appear busy. Only wait when useful independent analysis is exhausted and a specific pending result genuinely blocks the next decision.
 
 Keep reference validity, migration preservation, numerical agreement and application quality as separate claims. Do not search for an oracle or adjust acceptance until the candidate passes. A harness correction needs an independently demonstrated defect and a separately justified central policy change; retain the old failures and state the limits of the new evidence.
+
+## Deployment fidelity ownership
+
+Deployment authors select required fidelity, independently of accelerations.
+The numerical default remains the pinned PyTorch comparator. The approved
+quality mode names a model-declared, pinned baseline; the central harness owns
+metric implementation, continuation construction and acceptance. Do not infer
+approximation permission from dtype or quantization, fit thresholds to candidate
+failures, add optimizer-authored callbacks/policy, or waive exact execution
+obligations. Qualification records the deployment context and honest coverage.

@@ -60,8 +60,8 @@ def placements(case, model, entries, environments):
                     group = SimpleNamespace(world_size=tp, rank=0)
                     binding = NodeBinding(model, shell, node,
                         torch.device(env.device) if env.available else torch.device('cpu'),
-                        dtype_for(model), group,
-                        SimpleNamespace(world_size=1, rank=0), {}, model.get_node_resources(),
+                        dtype_for(model, case.deployment_config), group,
+                        SimpleNamespace(world_size=1, rank=0), {**case.deployment_config, 'runtime_extension': env.runtime_options}, model.get_node_resources(),
                         graph_walks=walks)
                     facts = static_facts(binding) | env.facts()
                     if not env.available:

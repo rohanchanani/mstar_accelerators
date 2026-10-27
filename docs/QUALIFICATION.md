@@ -160,142 +160,105 @@ unknown request types and unexpected construction/execution failures propagate;
 they cannot become a reference-unavailability SKIP. Neither registrations nor
 models acquire an additional authored qualification field.
 
-## 4. Numerical policy: component-rms-v1
+## 4. Numerical policy: pinned PyTorch compiler comparator
 
-The current default is an empirical tensor accuracy policy. For finite reference
-values `b`, define `s = RMS(b)` and `d = abs(actual - b)` in FP64 analysis.
+`testing/numerics.py` owns one fixed numerical policy. It calls the vendored
+Tensor branch of PyTorch v2.9.1
+[`torch._dynamo.utils.same`](https://github.com/pytorch/pytorch/blob/v2.9.1/torch/_dynamo/utils.py).
+The upstream source hash and license accompany the port. Neither an acceleration
+nor a command-line argument supplies a comparator, tolerance, reference recipe,
+or acceptance exception.
 
-For logically FP32 output, both conditions must hold:
+For one declared floating tensor:
 
-```
-every d[i] <= 1e-3 + 1e-3 * max(abs(b[i]), s)
-RMS(d)    <= 1e-5 + 1e-5 * s
-```
+1. Require the declared shape and storage dtype. Validate finite numerical
+   payloads; model-declared suppressed logits must contain exactly the expected
+   negative-infinity mask. Discrete outputs and exact state effects use equality.
+2. Compare acceleration and eager reference with `atol=rtol=1e-3`, as in the
+   central Dynamo repro accuracy caller. A pass does not execute FP64.
+3. Only after that numerical comparison fails, obtain a promoted reference and
+   apply the upstream fallback unchanged: `RMSE(actual, fp64) <=
+   multiplier * RMSE(eager, fp64) + 1e-4`. The multiplier is 3 for FP16/BF16
+   and 2 otherwise, with the upstream small-tensor/spatial-1x1 adjustment to 3.
 
-The first bound retains a check on every coordinate and supplies a meaningful
-tensor scale near zero. The second rejects a systematic bias that could satisfy
-every coordinate's looser bound. Scaling uses RMS, not the largest reference
-element. RMS itself is computed with magnitude scaling to avoid overflow.
+Fixed options are `equal_nan=True`, `exact_dtype=True`, `ignore_non_fp=False`,
+`cos_similarity=False`, `use_larger_multiplier_for_smaller_tensor=False`, and
+`force_max_multiplier=False`. The logical finite-payload safeguard runs before
+this helper; enabling upstream `equal_nan` does not authorize invalid model
+outputs. No minifier wrapper that treats execution exceptions as success is
+used. A missing promoted result cannot manufacture a PASS.
 
-These budgets describe complete-component qualification, not individual FP32
-instruction accuracy. During development a tighter peak draft also rejected
-ordinary HF FP32 against FP64 on the tail fixture. Independent builder/HF FP64
-execution agreed to about 6.5e-12 maximum error on that fixture; the FP32
-discrepancy grew through an encoder feed-forward block. The final policy uses a
-clean component error budget rather than fitting a threshold to those outliers.
-The aggregate budget is tighter than the draft's, and deliberate isolated
-corruption and dense bias are separately rejected by tests. This evidence
-supports the initial policy; it does not derive a universal error bound from
-dtype or guarantee that every future correct program will pass.
+Both reference and acceleration execute through M*'s ordinary engine. M* owns
+request registration, allocation, admission, plans, execution, commit and
+release. Model-aware reference programs supply arithmetic through the existing
+callable runner; they do not implement another scheduler or lifecycle.
+Reference weights, inputs and floating state are promoted; explicit precision
+casts in reference arithmetic remain explicit. This ports the central numerical
+comparator, not every specialized torch.compile benchmark caller or an FX graph
+rewriter. Large promoted weights may use file-backed CPU storage; placement
+changes neither the candidate nor the numerical rule.
 
-Shape and actual storage dtype are exact requirements. A higher-precision oracle
-does not permit an implementation to return a different storage dtype. Integer,
-boolean and explicitly exact observations use equality without conversion to
-float. Any NaN fails. Infinite positions and signs must match exactly; finite
-scales exclude infinities, so masked logits cannot receive an infinite budget.
-Empty and matching infinite-only tensors have explicit behavior.
+Generated outputs use a distinct ordinary inference-validation policy. An
+emitted greedy token must maximize its own finite, correctly suppressed logits.
+For one autoregressive sequence, equal prefix tokens pass; at the **first**
+divergence, each token must belong to the other execution's highest five scores,
+then cross-reference token agreement stops. This follows
+vLLM's `check_logprobs_close` and `num_logprobs=5` in its common generation tests,
+pinned at `7a1ebe4ef5887989bb167e247304360ba0150cf6`:
+[comparator](https://github.com/vllm-project/vllm/blob/7a1ebe4ef5887989bb167e247304360ba0150cf6/tests/models/utils.py),
+[caller](https://github.com/vllm-project/vllm/blob/7a1ebe4ef5887989bb167e247304360ba0150cf6/tests/models/language/generation/test_common.py).
+For Talker, one depth-predictor codec frame is such a sequence: each group
+conditions on preceding groups. The bounded state tests teacher-force candidate
+codes into the reference. Before the first differing token, these are also the
+reference's own choices. Afterwards they produce conditional diagnostics, not
+an independently generated reference sequence. The ordinary upstream sequence
+rule does not gate on those later diagnostics. Schema, suppression, finiteness
+and own-sampler checks still apply to **every** group. Own-history speech tests
+below cover the resulting continuations. No additional logprob-gap threshold is
+combined with this rule.
 
-The same centralized table has initial FP64, FP16 and BF16 profiles. These are
-starting empirical policies, not claims that arbitrary models or devices have
-been qualified at those precisions. The current real deployment remains FP32.
-A caller may select a different comparator or `NumericalPolicy`; future strict
-annotations or accuracy policies belong to that consumer. No such annotation is
-required for the initial two generated declarations.
+The initial v1 adaptation instead required reciprocal membership separately at
+every teacher-forced group. That was an additional, stricter conditional-output
+requirement, not a faithful port of upstream's sequence stopping rule. Version 2
+corrects this scope; v1 FAIL reports remain intact. This is a qualification-policy
+correction, not an acceleration arithmetic repair or a numerical-equivalence PASS.
 
-RMS scaling is not a universal semantic equivalence relation. Large-amplitude
-channels affect the scale, padding affects RMS, and global statistics do not
-describe every important subregion. Model-aware exact sink/state checks remain
-necessary. A future consumer may compare meaningful slices or enforce a task
-metric. There is no claim of transitivity or proof of correctness.
+The report retains raw-logit allclose results as **diagnostics**, without
+launching a promoted execution of internal generation scores. Declared floating
+outputs still require the pinned numerical rule, including lazy promotion.
+Generation PASS does not establish full-node `torch.same`, distribution equality,
+or a permitted TV/KL error budget. Historical numerical failures remain failures
+under their original policy. No deployment annotation selects this ordinary gate.
 
-### Qwen inference outputs: registry-differential-v2
+Talker also runs own-history speech continuations on fixed text conditioning at
+batches one and eight. Both Talkers execute through M* with independent state;
+no reference codec or internal route is forced onto the candidate. The same M*
+Code2Wav engine consumes both outputs with the model's production streaming
+policy. Text-only input fixtures use the model's actual inclusion mask and
+checkpoint embeddings; these are logical Talker inputs, not a Thinker quality test.
+The CPU ASR judge is pinned `openai/whisper-large-v3-turbo` at
+`41f01f3fe87f28c78e2fbf8b568835947dd65ed9`, with the vendored Whisper English
+normalizer. **Each** candidate clip must have no more word errors than its paired
+reference, both over the full text and over the opening sentence. EOS, nonempty
+transcription and valid audible PCM are required on both sides. No aggregate
+median or new absolute WER allowance determines acceptance.
 
-The previous Qwen rule compared BF16 GPU execution with an independently
-sampled CPU FP32 Talker trajectory, required identical codec IDs and applied a
-component RMS budget to every intermediate KV array. That rule also rejected
-stock Hugging Face (26/40 BF16 KV arrays and 8/40 FP32 arrays on the original
-prefill control). Those failures are preserved; they do not establish candidate
-correctness. This is a justified change to the central oracle and acceptance
-claim, not a kernel repair or a retroactive PASS for the earlier report.
+ASR-based speech validation is established in Qwen/vLLM-Omni testing. Per-clip
+paired non-regression and the opening-sentence check are explicit platform
+choices prompted by the known failure that aggregate metrics concealed; they
+are not advertised as upstream's exact test. Test them against retained bad
+speech and corruption controls before qualification. ASR can miss acoustic
+artifacts, so this remains bounded content-validation evidence, not proof of
+perceptual quality, speaker identity, or arbitrary prompt correctness.
 
-The updated gate follows the inference-output approach in
-[vLLM's model test utilities](https://github.com/vllm-project/vllm/blob/main/tests/models/utils.py)
-and [PyTorch's numerical accuracy guidance](https://docs.pytorch.org/docs/2.9/notes/numerical_accuracy.html):
+Sampling distribution, RNG progress, resource state, retained outputs and cleanup
+retain their separate strict checks. No component-RMS, migration or historical
+winner exception exists. Numerical tensors are not pooled or split to alter a
+comparison decision.
 
-- Talker uses stock Transformers backbones at the declared precision and device,
-  with the same pinned logical weights. The harness interprets M*'s logical
-  conditioning and history; it imports no candidate kernels into the reference.
-  Thinker retains the ordinary M* reference at the same BF16 precision.
-- `generation-reciprocal-top5-ties-v2` observes the actual runtime sampler's input and
-  returned token. Each token must be an argmax of its own logits after the
-  centrally interpreted repetition penalty. Suppressed positions must match.
-  If the reference and candidate choose different tokens, each choice must be
-  among the other's five highest logits, following vLLM's reciprocal top-N rule.
-  Log probabilities and reference regret are reported. This is a rank-based
-  generation gate, not a bound on the whole probability distribution.
-  Rank is one plus the number of strictly greater scores, including exact ties
-  at the fifth-place boundary. This explicitly refines the index-list check:
-  [PyTorch does not guarantee stable indices for tied `topk` values](https://docs.pytorch.org/docs/2.9/generated/torch.topk.html).
-  The original rule falsely rejected a reference choice tied for fourth because
-  `topk` returned other tokens with the identical BF16 score. Neither the rank
-  cutoff nor a numerical tolerance is increased; no near-equal values are
-  treated as ties. Earlier receipts keep their original policy and verdicts.
-- The reference scores the **same actual token prefix**, including earlier codec
-  groups, rather than allowing two trajectories to diverge and then comparing
-  unrelated states. Every supplied token is still scored; teacher forcing does
-  not make a wrong output pass by construction. Codec embeddings must equal
-  the FP32 accumulation of the chosen codes' checkpoint embeddings under the
-  existing FP32 numerical policy.
-- `hidden-cosine-norm-v1` checks every graph-visible conditioning row: cosine
-  similarity at least 0.999 (vLLM's default embedding threshold), and vector
-  norms close with BF16 `torch.testing.assert_close` defaults, rtol 0.016 and
-  atol 1e-5. The added norm check rejects scaling that cosine alone cannot see.
-  It is a platform-owned policy for conditioning, not an unchanged vLLM test.
-- KV lengths, positions, draw counts, sampled-token collection, seen-token
-  history, retained cache prefixes, row lifetime and release remain exact.
-  Seen-token history follows what execution actually emitted. KV numerical
-  differences remain in `kv_numerical_diagnostics`; they are not whole-node
-  acceptance requirements. Shape, dtype, finiteness and previously stored
-  prefix preservation remain required. Current and later output decisions
-  exercise the newly written KV state.
-
-These rules replace numerical/token comparisons in the existing centralized
-Qwen adapter; they do not add a second accelerator qualification suite. Audio
-encoder comparison, Whisper policy and low-level kernel/backend tests are
-unchanged. No acceleration supplies a test recipe or tolerance. No serving,
-scheduler or acceleration implementation is changed by this policy revision.
-
-Sampler observations clone tensors at the existing resource boundary, before
-warmup/capture. Captured clones update on actual replay. Sampling choices and
-runtime state are never substituted. These are instrumented correctness runs;
-their timings are not performance evidence. Positive controls compare stock HF
-BF16 eager and SDPA on a shared prefix; negative controls corrupt choices,
-suppression, hidden-state direction and scale. The existing batch/walk/removal
-coverage is retained. Bounded model-output agreement does not establish speech
-intelligibility, full-service quality, all supported shapes or benchmark parity.
-Those claims retain their existing separate evidence requirements.
-
-### Reference choice for Whisper
-
-The encoder uses the model-owned HF program on CPU in FP64, promoting the exact
-logical FP32 input and weight values. Native storage/computation stays FP32.
-Independent HF/builder FP64 agreement on the preserved fixtures supports this
-reference choice. The decoder uses the original model-owned CPU FP32 program on
-the same boundary input and resource plans. The host integration regression
-also retains original-FP32 composed-reference token/EOS checks.
-
-The previous `abs(a-b) <= 3e-4 + 3e-4*abs(b)` comparison against Pi HF FP32 remains
-available as `legacy-pointwise-3e-4`. Its historical FAIL is never rewritten.
-The earlier centralized-policy revision deliberately changed reference evaluation
-and comparison policy; this source-generation revision retains that policy.
-Source review and independent high-precision agreement motivate it;
-neither transcript agreement nor a desired PASS is sufficient justification.
-
-The original native capture reevaluation is labeled evidence replay, not fresh
-execution. The old comparison still reports 24/full and 3/tail mismatches. The
-new policy accepts those stored observations. Fresh corpus consumption is the
-acceleration qualification. Stored captures and earlier native trajectories
-remain separately identified historical evidence.
+Numerical policy changes are separate, justified platform changes. Historical
+failures remain historical failures. The harness evaluates the current
+acceleration against its reference contract, regardless of how it was written.
 
 ## 5. Real declarations and framework regressions
 
@@ -360,40 +323,13 @@ the Pi environment host retains the managed exceptional drain/fatal boundary and
 owner release. That synchronization is at the
 qualification observation/release boundary; serving stream behavior is unchanged.
 
-### Host graph algebra and FP32 integration
+### Host graph tests and hardware qualification
 
-`full_checkpoint_builder_algebra_v2` separates two host-test responsibilities.
-The encoder graph's algebra is evaluated in FP64 on the exact logical FP32
-weights and inputs, and compared with the independent model-owned HF FP64
-encoder using the existing centralized FP64 profile. This read-only evaluation
-does not emulate native kernels or qualify an FP64 deployment.
-
-The original FP32 graph evaluator still runs and supplies the encoder states
-used by the complete FP32 decoder trajectory. Same-input logits and KV checks,
-exact token/EOS and state/effect assertions, and result-lifetime checks remain
-required. Its FP32 encoder comparison against HF FP64 is retained as a named
-diagnostic under unchanged `component-rms-v1`, alongside the legacy diagnostic.
-A diagnostic FAIL remains FAIL; neither is a required observation of this
-versioned algebra/integration gate. Actual registered Pi programs remain subject
-to their required FP32 numerical and exact-effect checks.
-
-This is an explicit change in the host gate's claim, not an arithmetic repair.
-The preceding campaign remains INCOMPLETE under its original requirements, and
-the AArch64 FP32 interpreter's tail-encoder comparison remains failed. A new host
-gate PASS does not qualify that interpreter as a production CPU acceleration.
-The previous CPU-only revision could reuse separately identified native receipts
-because its production source and binary identities were unchanged. This new
-source-generation/binding revision requires fresh corpus and service execution.
-Report scopes and provenance separately; do not present old device observations
-as fresh execution.
-
-The source-generation rehearsal uses the new gate identity
-`generated_files_engine_algebra_v1`. It retains the same numerical policies and
-observations while driving the filled source files through the actual M* engine,
-with an explicitly injected CPU graph provider. It projects only the Pi device
-predicate for this host interpretation; it does not emulate native kernels or
-qualify a CPU deployment. Binding source has changed, so prior Pi evidence does
-not qualify this new revision without a fresh target run.
+CPU graph-algebra and generated-source tests exercise authoring and engine
+integration. They do not qualify native kernels or replace registry qualification.
+Historical host receipts retain the policy under which they were recorded; they
+are not evidence that the current central contract passed. Current numerical
+checks use the pinned comparator described above.
 
 ### Positive-temperature sampling
 
@@ -405,7 +341,10 @@ bounds, not hidden serving restrictions. Unsupported or unresolved policies keep
 their existing diagnosed coverage limits. No extra declaration field is required.
 
 `categorical-cdf-dkw-v1` compares 64 draws from an identical logical input/state
-against temperature-scaled probabilities from the independent model reference.
+against temperature-scaled probabilities from the candidate's observed logits.
+This checks whether sampling follows the scores actually produced; it does not
+establish their accuracy against the logical model. Independent generated-output checks assess reference agreement separately.
+The categorical sampling check alone never establishes model accuracy.
 Its fixed 63-bit seeds are derived under a documented qualification namespace.
 It uses empirical CDF distance with nominal DKW calibration at alpha `1e-6`
 (budget about `0.3367` for 64 draws). Reports include actual tokens, seeds,
@@ -416,7 +355,7 @@ control must fail this policy.
 
 Vocabulary, I64 result shape/dtype and exclusion of explicitly suppressed tokens
 are exact. Repeating the initial seed with the same inputs/state must repeat the
-actual token exactly. Numerical KV accuracy remains `component-rms-v1`; position,
+actual token exactly. Numerical KV accuracy uses `pytorch-dynamo-repro-2.9-v1`; position,
 sampling effects, result lifetime and preservation remain exact. The primary and
 paired trajectories retain full cache comparisons. The extra distribution draws
 retain tokens and exact effects without accumulating 64 full-cache snapshots.
@@ -492,9 +431,10 @@ implementation's collective protocol.
 
 The authored CPU implementation chooses FP64 intermediate arithmetic and weight
 representations. The logical contract, encoder boundary and persistent KV stay
-FP32. The existing encoder FP64 reference, decoder FP32 reference and unchanged
-`component-rms-v1` policy apply to those outputs and state. This does not qualify
-the historical CPU FP32 graph interpreter, whose named diagnostics are retained.
+FP32. Both reference and candidate execute through M*. The ordinary reference uses
+the logical precision; the centralized comparator requests FP64 execution only
+when the ordinary numerical comparison fails. The pinned PyTorch policy applies
+to numerical outputs and state; exact ownership checks remain exact.
 
 The existing independent and companion cases run on each participating role,
 including two-live refusal/reassignment, poisoned-tail initialization, exact
@@ -532,3 +472,43 @@ dispatches removal, then publishes failure. Cleanup completion is separately
 observed in receipts; there is no extra per-request cleanup-completion ACK in
 that publication barrier. Instance-fatal notification belongs to deployment
 shutdown and is distinct from that ordinary request drain path.
+
+## Deployment fidelity
+
+`mstar.model.fidelity.resolve_fidelity` reads the deployment producer's small,
+closed language: `mode: numerical` (the default) or `mode: quality` with a named
+`at_least` model baseline. `Model.quality_baselines()` returns declarative data,
+not a callback. The platform corpus references the deployment; there is no new
+harness configuration argument. Dtype is resolved using the serving resolver.
+
+`testing/quality.py` checks applicability and scores outputs. A baseline pins the
+logical checkpoint, evaluation samples and hashes, normalization, generation
+protocol and measured score. Implementations cannot supply tolerances, fixtures,
+metrics, exceptions or quality callbacks. Changing this policy or a model's
+baseline is a separately justified change, independent of acceleration tuning.
+
+The initial metric is English normalized word error rate using the unchanged
+OpenAI Whisper normalizer at `86098128c0b4f24f0e2aa2994de830614b474227`.
+The Pi deployment selects the measured public ggml whisper.cpp + Arm KleidiAI
+baseline: at most 10 edits across the six fixed development clips containing 87
+normalized reference words, English transcription, greedy decoding, normal EOS,
+and at most 444 generated tokens. The integer edit budget is used directly.
+The baseline was independently measured; it is not fitted to candidate tensors.
+
+`testing/models/whisper_quality.py` constructs isolated node continuations through
+M*: candidate encoder followed by reference decoder; reference encoder followed
+by candidate decoder; reference prefill for decode-only declarations; candidate
+prefill state and first token transferred to reference decoding for prefill-only
+declarations. Transfers address logical written tokens through each runtime
+owner's own plans and cache accessors. They do not assume identical page IDs,
+recompute candidate state, change runtime counters, or force reference tokens.
+
+Cross-reference floating closeness is replaced by the declared task-quality
+requirement in this mode. Shapes, logical dtypes, finite payloads, exact
+suppression masks, allocation/commit, immutable-state preservation, output
+lifetime and sampling from the implementation's own logits remain mandatory.
+The PyTorch default comparator itself is unchanged. Stochastic-only declarations
+cannot receive greedy-quality PASS; their quality domain is explicitly missing.
+A pass is bounded to these fixtures and continuation contexts. Independent node
+passes do not imply that an arbitrary composition passes; the selected deployed
+composition must also satisfy the same task-quality requirement.

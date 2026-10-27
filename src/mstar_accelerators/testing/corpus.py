@@ -12,6 +12,16 @@ import json
 class ModelCase:
     key: str
     model_name: str
+    deployment: str | None = None
+
+    @property
+    def deployment_config(self):
+        if self.deployment is None:
+            return {}
+        import yaml
+        path = Path(__file__).resolve().parents[3] / "deployments" / self.deployment
+        data = yaml.safe_load(path.read_text())
+        return {key: data[key] for key in ("autocast_dtype", "fidelity") if key in data}
 
     @property
     def directory(self):
@@ -36,12 +46,13 @@ class ModelCase:
     def identity(self):
         manifest = self.manifest
         return {'corpus': self.key, 'model': self.model_name,
-                'checkpoint': manifest['model'], 'revision': manifest['revision']}
+                'checkpoint': manifest['model'], 'revision': manifest['revision'], 'deployment': self.deployment,
+                'execution_contract': self.deployment_config}
 
 
 # New logical semantics/configurations extend this central corpus and the
 # model-level case constructors. A new physical implementation never does.
-MODELS = (ModelCase('whisper_tiny', 'whisper'), ModelCase('qwen3_omni', 'qwen3_omni'))
+MODELS = (ModelCase('whisper_tiny', 'whisper', 'whisper_tiny_pi_cpu.yaml'), ModelCase('qwen3_omni', 'qwen3_omni'))
 
 
 def logical_nodes(model):

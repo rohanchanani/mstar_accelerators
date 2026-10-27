@@ -1,0 +1,40 @@
+# Render paths and verified artifact identities with tools/whisper/prepare_assets.py.
+model: whisper
+model_kwargs:
+  model_path_hf: REPLACE_WITH_VERIFIED_LOCAL_CHECKPOINT
+device_type: cpu
+autocast_dtype: float32
+fidelity:
+  mode: quality
+  at_least: public-q8-kleidiai-v1
+max_seq_len: 448
+max_concurrent_requests: 2
+preprocess_torch_threads: 1
+resources:
+  kv_cache:
+    max_bytes: 16777216
+    prefix_cache: false
+  cross_kv_cache:
+    max_bytes: 58720256
+    prefix_cache: false
+node_groups:
+- node_names:
+  - audio_encoder
+  - decoder
+  ranks:
+  - 0
+  tp_size: 1
+runtime_extension:
+  factory: mstar_accelerators.backends.torch.runtime:TorchRuntime
+  accelerations: accelerations/whisper/pi_cpu
+  threads: 1
+  node_threads:
+    audio_encoder: 1
+    decoder: 1
+  cpu_ggml:
+    library: REPLACE_WITH_EXPLICIT_ABSOLUTE_LIBRARY_PATH
+    sha256: REPLACE_WITH_EXPLICIT_LIBRARY_SHA256
+  cpu_ggml_cross_threads: 4
+  cpu_ggml_threads:
+    audio_encoder: 4
+    decoder: 2

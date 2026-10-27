@@ -4,6 +4,7 @@ There is no qualification implementation of reserve/admit/plan/execute/commit.
 The engine owns that sequence, resource construction, agreement and teardown.
 """
 import torch
+from dataclasses import replace
 
 from mstar.conductor.request_info import CurrentForwardPassInfo
 from mstar.distributed.communication import WorkerParallelGroups
@@ -40,12 +41,16 @@ def join_placements(*assemblies):
 
     def close():
         for assembly in assemblies:
-            if assembly.close is not None:
+            if getattr(assembly, "close", None) is not None:
                 assembly.close()
 
-    return NodeAssembly(bind, merge_resource_requests(*(a.resource_requests for a in assemblies)),
-                        tuple(name for a in assemblies for name in a.execution_names),
-                        frozenset().union(*(a.device_plan_resources for a in assemblies)), close)
+    changes = dict(bind=bind, resource_requests=merge_resource_requests(*(a.resource_requests for a in assemblies)),
+                   execution_names=tuple(name for a in assemblies for name in a.execution_names))
+    if hasattr(assemblies[0], 'device_plan_resources'):
+        changes['device_plan_resources'] = frozenset().union(*(a.device_plan_resources for a in assemblies))
+    if hasattr(assemblies[0], 'close'):
+        changes['close'] = close
+    return replace(assemblies[0], **changes)
 
 
 def load_engine(binding, assembly, session, parallel_groups=None):
@@ -65,9 +70,9 @@ def load_engine(binding, assembly, session, parallel_groups=None):
 
 
 @torch.no_grad()
-def execute(engine, node, walk, rid, inputs, *, resource_configs=None, observe=None):
+def execute(engine, node, walk, rid, inputs, *, resource_configs=None, observe=None, metadata=None):
     info = CurrentForwardPassInfo(f"qualification:{rid}", walk, 0, 0, 448,
-                                  rid_handle=rid, resource_configs=resource_configs or {})
+                                  rid_handle=rid, resource_configs=resource_configs or {}, step_metadata=metadata or {})
     batch = ExecutingBatch(node, {rid: info}, StepContext([rid], walk, 0, False),
                            per_request_input_tensors={rid: inputs})
     shell = engine._submodules[node].submodule

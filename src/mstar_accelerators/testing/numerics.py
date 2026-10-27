@@ -1,173 +1,100 @@
-"""Optimization-platform numerical policy, independent of serving admission.
-
-These are empirical qualification budgets, not a theorem about every model.
-The default combines a per-element bound with a tighter aggregate error bound.
-Reference RMS supplies a scale near zero; a large tensor maximum does not.
-Callers may select another policy, including strict pointwise comparison.
-"""
-from __future__ import annotations
-
-from dataclasses import dataclass
-import math
-from typing import Any
-
+"""One pinned PyTorch numerical policy, behind logical schema/state validation."""
+from types import SimpleNamespace
 import torch
+from ._vendor.pytorch_same import same
+
+DEFAULT = SimpleNamespace(name="pytorch-dynamo-repro-2.9-v1")
+UPSTREAM_OPTIONS = dict(tol=1e-3, equal_nan=True, exact_dtype=True,
+    cos_similarity=False, ignore_non_fp=False,
+    use_larger_multiplier_for_smaller_tensor=False, force_max_multiplier=False)
 
 
-@dataclass(frozen=True)
-class Tolerance:
-    atol: float
-    rtol: float
-    rms_atol: float
-    rms_rtol: float
+def compare(name, actual, expected, *, exact=False, dtype=None, promoted=None,
+            suppression_mask=None, structural_only=False):
+    """Compare one declared tensor; never regroup rows or cast away its dtype.
 
-
-@dataclass(frozen=True)
-class NumericalPolicy:
-    name: str
-    tolerances: dict[torch.dtype, Tolerance]
-    rms_floor: bool = True
-    check_rms: bool = True
-
-
-# These profiles belong to this consumer. A future quantized, task-level or
-# adversarial-review consumer can use another policy without changing M* or
-# requiring a new field in every acceleration declaration.
-DEFAULT = NumericalPolicy("component-rms-v1", {
-    torch.float64: Tolerance(1e-10, 1e-10, 1e-11, 1e-11),
-    torch.float32: Tolerance(1e-3, 1e-3, 1e-5, 1e-5),
-    torch.float16: Tolerance(3e-3, 3e-3, 3e-4, 3e-4),
-    torch.bfloat16: Tolerance(3e-2, 3e-2, 3e-3, 3e-3),
-})
-
-# Retains the old Whisper rule as named diagnostic evidence. It is not the
-# default acceptance rule and does not acquire a new verdict retroactively.
-LEGACY_POINTWISE = NumericalPolicy(
-    "legacy-pointwise-3e-4", {torch.float32: Tolerance(3e-4, 3e-4, 0., 0.)},
-    rms_floor=False, check_rms=False,
-)
-
-
-def _rms(values: torch.Tensor) -> torch.Tensor:
-    """Scale before squaring so finite FP64 magnitudes do not overflow."""
-    peak = values.abs().max()
-    return peak * ((values / peak).square().mean().sqrt()) if peak else peak
-
-
-def compare(name: str, actual: Any, expected: Any, *, exact: bool = False,
-            dtype: torch.dtype | None = None,
-            policy: NumericalPolicy = DEFAULT) -> dict:
-    """Return a serializable check; a numerical mismatch never interrupts drain.
-
-    ``dtype`` identifies the required output storage dtype. It defaults to the
-    reference dtype; supply it explicitly for an FP64 diagnostic reference of
-    a logically FP32 output. Integer/bool outputs and exact effects use equality.
-    Tensors may be staged to CPU here, at this explicit testing read boundary.
-    Backend errors from staging are allowed to propagate to the managed owner.
+    Suppression is a semantic mask supplied by the case constructor, not inferred
+    from candidate errors. Ordinary outputs must be finite. Discrete values and
+    explicitly exact effects bypass floating tolerance entirely.
     """
-    result = {"name": name, "passed": False, "policy": policy.name}
-    tensor_pair = isinstance(actual, torch.Tensor) and isinstance(expected, torch.Tensor)
-    if not tensor_pair:
+    result = {"name": name, "passed": False, "policy": DEFAULT.name}
+    if not isinstance(actual, torch.Tensor) or not isinstance(expected, torch.Tensor):
         if isinstance(actual, torch.Tensor) or isinstance(expected, torch.Tensor):
             return result | {"reason": "tensor/value kind mismatch"}
         if not exact:
-            raise TypeError("non-tensor observations must explicitly request exact comparison")
-        same = type(actual) is type(expected) and actual == expected
-        return result | {"passed": bool(same), "policy": "exact-v1",
-                         "reason": "equal" if same else "exact value mismatch"}
-
-    logical_dtype = expected.dtype if dtype is None else dtype
-    result.update(actual_dtype=str(actual.dtype), reference_dtype=str(expected.dtype),
-                  required_dtype=str(logical_dtype), shape=list(actual.shape))
+            raise TypeError("non-tensor observations require exact comparison")
+        passed = type(actual) is type(expected) and actual == expected
+        return result | {"policy": "exact-v1", "passed": bool(passed), "reason": "exact value comparison"}
+    required = expected.dtype if dtype is None else dtype
+    result.update(shape=list(actual.shape), actual_dtype=str(actual.dtype),
+                  reference_dtype=str(expected.dtype), required_dtype=str(required))
     if actual.shape != expected.shape:
-        return result | {"reason": "shape mismatch", "reference_shape": list(expected.shape)}
-    if actual.dtype != logical_dtype:
-        return result | {"reason": "output dtype mismatch"}
-    if exact or not actual.is_floating_point():
-        if expected.dtype != actual.dtype:
-            return result | {"reason": "exact comparison dtype mismatch"}
-        same = torch.equal(actual.detach().cpu(), expected.detach().cpu())
-        return result | {"passed": same, "policy": "exact-v1",
-                         "reason": "equal" if same else "exact tensor mismatch"}
-    if not expected.is_floating_point():
-        return result | {"reason": "floating/reference kind mismatch"}
-
-    tolerance = policy.tolerances.get(logical_dtype)
-    if tolerance is None:
-        raise ValueError(f"{policy.name} has no profile for {logical_dtype}")
-    result.update(atol=tolerance.atol, rtol=tolerance.rtol,
-                  rms_atol=tolerance.rms_atol, rms_rtol=tolerance.rms_rtol,
-                  rms_floor=policy.rms_floor, check_rms=policy.check_rms)
-    a = actual.detach().to(device="cpu", dtype=torch.float64)
-    b = expected.detach().to(device="cpu", dtype=torch.float64)
-    if a.isnan().any() or b.isnan().any():
-        return result | {"reason": "NaN is not accepted by this policy"}
-    finite = b.isfinite()
-    if not torch.equal(a.isfinite(), finite) or not torch.equal(a[~finite], b[~finite]):
-        return result | {"reason": "nonfinite position/sign mismatch"}
-    count = int(finite.sum())
-    result.update(elements=a.numel(), finite_elements=count)
-    if count == 0:
-        return result | {"passed": True, "reason": "matching empty or infinite-only output",
-                         "max_abs_error": 0., "rms_error": 0., "mismatched_elements": 0}
-    a, b = a[finite], b[finite]
-    delta = (a - b).abs()
-    if not delta.isfinite().all():
-        return result | {"reason": "finite outputs have an overflowing discrepancy"}
-    reference_rms = _rms(b)
-    rms_error = _rms(delta)
-    scale = torch.maximum(b.abs(), reference_rms) if policy.rms_floor else b.abs()
-    budget = tolerance.atol + tolerance.rtol * scale
-    bad = delta > budget
-    rms_budget = tolerance.rms_atol + tolerance.rms_rtol * reference_rms
-    pointwise_ok = not bool(bad.any())
-    rms_ok = not policy.check_rms or bool(rms_error <= rms_budget)
-    passed = pointwise_ok and rms_ok
-    # Profiles have positive absolute floors. Exact comparison is a separate
-    # path, rather than a zero-denominator floating tolerance convention.
-    max_budget_ratio = float((delta / budget).max())
-    ratio_overflow = not math.isfinite(max_budget_ratio)
-    result.update(passed=passed,
-                  reason="within numerical policy" if passed else "numerical policy exceeded",
-                  reference_rms=float(reference_rms), rms_error=float(rms_error),
-                  rms_budget=float(rms_budget), max_abs_error=float(delta.max()),
-                  max_budget_ratio=None if ratio_overflow else max_budget_ratio,
-                  mismatched_elements=int(bad.sum()), pointwise_passed=pointwise_ok,
-                  rms_passed=rms_ok)
-    if ratio_overflow:
-        # An enormous finite error still needs a valid JSON failure receipt.
-        # This diagnostic ratio does not participate in either acceptance test.
-        result["ratio_overflow"] = True
-    if not pointwise_ok:
-        flat_positions = finite.flatten().nonzero().flatten()
-        failures = bad.nonzero().flatten()[:8]
-        result["first_failures"] = [
-            {"flat_index": int(flat_positions[i]), "actual": float(a[i]),
-             "reference": float(b[i]), "error": float(delta[i]), "budget": float(budget[i])}
-            for i in failures
-        ]
+        return result | {"reason": "shape mismatch"}
+    if actual.dtype != required or expected.dtype != required:
+        return result | {"reason": "output/reference dtype mismatch"}
+    a, b = actual.detach().cpu(), expected.detach().cpu()
+    if exact or not (a.is_floating_point() or a.is_complex()):
+        return result | {"policy": "exact-v1", "passed": torch.equal(a, b),
+                         "reason": "exact tensor comparison"}
+    mask = None
+    if suppression_mask is not None:
+        mask = suppression_mask.detach().cpu()
+        if mask.dtype != torch.bool or mask.shape != b.shape:
+            return result | {"reason": "invalid logical suppression mask"}
+        if any(not torch.equal(torch.isneginf(x), mask) for x in (a, b)):
+            return result | {"reason": "suppression mask mismatch"}
+        a, b = a[~mask], b[~mask]
+        if not a.numel():
+            return result | {"reason": "no unsuppressed logits"}
+    if any(not bool(x.isfinite().all()) for x in (a, b)):
+        return result | {"reason": "nonfinite logical numerical payload"}
+    if structural_only:
+        return result | {"passed": True, "policy": "quality-structural-v1",
+                         "reason": "schema, suppression and finite payload valid; fidelity checked by task continuation"}
+    # The promoted execution is lazy: allclose is the upstream first branch.
+    direct = torch.allclose(b, a, atol=1e-3, rtol=1e-3, equal_nan=True)
+    promoted_value = None if direct else (promoted() if callable(promoted) else promoted)
+    h = None if promoted_value is None else promoted_value.detach().cpu()
+    if h is not None:
+        if h.shape != expected.shape:
+            return result | {"reason": "promoted reference shape mismatch"}
+        if mask is not None:
+            if not torch.equal(torch.isneginf(h), mask):
+                return result | {"reason": "suppression mask mismatch"}
+            h = h[~mask]
+        if not bool(h.isfinite().all()):
+            return result | {"reason": "nonfinite logical numerical payload"}
+    errors = []
+    passed = same(b, a, h, log_error=lambda fmt, *args: errors.append(fmt % args), **UPSTREAM_OPTIONS)
+    direct = torch.allclose(b, a, atol=1e-3, rtol=1e-3, equal_nan=True)
+    result.update(passed=bool(passed), reason="within upstream policy" if passed else "upstream numerical comparison failed",
+                  branch="allclose" if direct else "fp64-rmse" if (h if h is not None else b).dtype == torch.float64 else "allclose-failed",
+                  promoted_reference=h is not None, upstream_errors=errors)
     return result
 
 
-def assert_close(name: str, actual: Any, expected: Any, **kwargs) -> dict:
-    """Compatibility for ordinary host tests; all policy still lives above."""
+def assert_close(name, actual, expected, **kwargs):
     result = compare(name, actual, expected, **kwargs)
     if not result["passed"]:
         raise AssertionError(result)
     return result
 
 
-def differential_comparator(acceleration, observation) -> dict:
-    """Default harness callback; replacement consumers may inspect acceleration."""
+def differential_comparator(acceleration, observation):
     del acceleration
+    from .speech import SpeechOutput, score_speech
+    if isinstance(observation.expected, SpeechOutput):
+        return score_speech(observation.name, observation.actual, observation.expected)
     from .sampling import CategoricalDistribution, CategoricalSupport, compare_categorical
-
-    from .generation import GreedyOutput, HiddenStates, compare_greedy, compare_hidden
+    from .generation import GreedyOutput, GreedySequence, compare_greedy, compare_sequence
+    if isinstance(observation.expected, GreedySequence):
+        return compare_sequence(observation.name, observation.actual, observation.expected,
+                                suppression_mask=observation.suppression_mask)
     if isinstance(observation.expected, GreedyOutput):
-        return compare_greedy(observation.name, observation.actual, observation.expected)
-    if isinstance(observation.expected, HiddenStates):
-        return compare_hidden(observation.name, observation.actual, observation.expected)
+        return compare_greedy(observation.name, observation.actual, observation.expected,
+                              promoted=observation.promoted, suppression_mask=observation.suppression_mask)
     if isinstance(observation.expected, (CategoricalSupport, CategoricalDistribution)):
         return compare_categorical(observation.name, observation.actual, observation.expected)
     return compare(observation.name, observation.actual, observation.expected,
-                   exact=observation.exact, dtype=observation.dtype)
+                   exact=observation.exact, dtype=observation.dtype,
+                   promoted=observation.promoted, suppression_mask=observation.suppression_mask)

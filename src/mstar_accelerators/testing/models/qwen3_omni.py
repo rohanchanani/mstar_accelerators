@@ -1,7 +1,7 @@
 """Bounded Qwen Talker trajectories through the actual registered engine runner.
 
-This optional correctness consumer owns its short synthetic inputs and same-precision HF
-oracle. It neither changes serving support nor replaces submitted computation.
+This central consumer owns short state trajectories, speech fixtures, and the
+same-precision HF reference. It neither changes serving support nor replaces submitted computation.
 The engine owns every actual request, KV allocation, sampler and graph replay.
 """
 from __future__ import annotations
@@ -25,8 +25,8 @@ from mstar.worker.engine_manager import EngineManager
 from mstar_accelerators.binding import invocation_facts, static_facts
 from mstar_accelerators.registry import Registry
 from mstar_accelerators.testing.harness import CasePlan, Comparison, Unavailable
-from .qwen3_omni_hf import HuggingFaceTalkerOracle
-from ..generation import GreedyOutput
+from .qwen_runtime_reference import TalkerReference
+from ..generation import GreedyOutput, GreedySequence
 from ..observations import SamplerObservation
 from ..numerics import compare
 from ..policy import QWEN_BATCHES, QWEN_DECODE_STEPS
@@ -70,15 +70,20 @@ def _offset(resource, rid):
     return int(resource._sampler._step_offset[rid])
 
 
-class QualificationSession:
+from ..whisper import QualificationSession as EngineSession
+
+
+class QualificationSession(EngineSession):
     """Retain live engine roots until the driver's ordinary device drain."""
     def __init__(self):
+        super().__init__()
         self.managers = []
 
     def close(self):
         for manager in reversed(self.managers):
             manager.shutdown()
         self.managers.clear()
+        super().close()
 
 
 class TalkerCaseAdapter:
@@ -93,7 +98,8 @@ class TalkerCaseAdapter:
         # Testing may install an explicitly labeled host replay backend before
         # warmup. The production driver never supplies this hook.
         self.prepare_engine = prepare_engine
-        self.oracle = None
+        self.oracle = self.promoted = None
+        self.history, self.promoted_results = [], None
 
     def __call__(self, name, acceleration):
         group = SimpleNamespace(world_size=1, rank=0)
@@ -107,7 +113,7 @@ class TalkerCaseAdapter:
             'preparation': 'exact registered implementation.prepare, ordinary EngineManager and selected.run',
             'case_policy': 'shared-history-generation-v2',
             'batch_domain': list(self.batches), 'decode_steps': self.decode_steps,
-            'sampling': 'greedy; repetition penalty 1.1; reciprocal top-5 reference choices; exact own argmax and draw accounting',
+            'sampling': 'codec-sequence first-divergence reciprocal top-five; exact own argmax and draw accounting for all groups',
             'finite_domain_only': True, 'trajectories': traces,
             'capture_policy': 'exercise requested decode recipes within their declared batch cap',
             'reference_storage': f'stock HF on {self.device} at {self.dtype}; shared candidate history',
@@ -126,22 +132,49 @@ class TalkerCaseAdapter:
         if acceleration.when.evaluate(singleton) is not Support.YES:
             raise Unavailable('trajectory_reference',
                               'this bounded adapter needs the declaration to construct its own prefill history')
+        from .qwen_speech import fixtures
+        self.speech_fixtures = fixtures(self.model, self.dtype)
         cache = None
 
         def execute(witness):
             nonlocal cache
             if cache is None:
                 if self.oracle is None:
-                    self.oracle = HuggingFaceTalkerOracle(self.model, device=self.device, dtype=self.dtype)
-                cache = self._execute(name, acceleration, static, traces)
+                    self.oracle = TalkerReference(self.model, self.session, self.device, self.dtype, _policy)
+                cache = self._execute(name, acceleration, static, traces, details)
             return cache[witness['graph_walk']]
 
         return CasePlan(static, domains, execute,
                         'stock HF same-precision Talker and dense per-request KV',
                         f'actual registered program through EngineManager on {self.device}', details)
 
+    def _higher(self, index, group):
+        if self.promoted_results is None:
+            self.promoted = TalkerReference(self.model, self.session, self.device, torch.float64, _policy)
+            self.promoted_results = {}
+            for i, event in enumerate(self.history):
+                if event[0] == 'add':
+                    self.promoted.add(event[1])
+                elif event[0] == 'remove':
+                    self.promoted.remove(event[1])
+                else:
+                    _, walk, rid, raw, codec = event
+                    value = self.promoted.step(walk, rid, raw, teacher_codes=codec)
+                    if value.result is not None:
+                        self.promoted_results[i] = tuple(x.cpu() for x in
+                            (value.talker_logits,) + value.predictor_logits)
+        return self.promoted_results[index][group]
+
+    @staticmethod
+    def _suppression_mask(shell, walk, group, logits):
+        mask = torch.zeros(logits.shape, dtype=torch.bool)
+        if group == 0:
+            ids = shell.logical_contract().suppressed_tokens[TALKER_SAMPLER][walk]
+            mask[list(ids)] = True
+        return mask
+
     @torch.no_grad()
-    def _execute(self, name, acceleration, static, traces):
+    def _execute(self, name, acceleration, static, traces, details):
         registry = Registry({name: acceleration})
         manager = EngineManager()
         self.session.managers.append(manager)  # retain partial construction on error
@@ -174,7 +207,8 @@ class TalkerCaseAdapter:
             record = {'batch_size': batch_size, 'executed': True, 'steps': []}
             traces.append(record)
             for rid in rids:
-                self.oracle.reset(rid)
+                self.oracle.add(rid)
+                self.history.append(('add', rid))
                 manager.add_request(rid, _policy(rid))
             previous, retained, previous_kv = {}, [], {}
             active = list(rids)
@@ -236,9 +270,11 @@ class TalkerCaseAdapter:
                 for row, rid in enumerate(active):
                     values = output.per_rid_outputs.get(rid, {})
                     codec = values['codec_tokens'][0].detach().cpu().clone() if sampling else None
-                    prior_seen = set(self.oracle.requests[rid].seen) if rid in self.oracle.requests else set()
-                    ref = self.oracle.step(walk, rid, batch.inputs[row], repetition_penalty=1.1,
-                                           teacher_codes=codec)
+                    prior_seen = self.oracle.seen(rid)
+                    ref = self.oracle.step(walk, rid, raw[rid], teacher_codes=codec)
+                    reference_index = len(self.history)
+                    self.history.append(('step', walk, rid,
+                        {key: [x.detach().cpu().clone() for x in tensors] for key, tensors in raw[rid].items()}, codec))
                     stem = prefix + f'/request{rid}'
                     kv = resources[TALKER_KV]
                     state = kv._streams[rid]['main']
@@ -283,16 +319,32 @@ class TalkerCaseAdapter:
                         Comparison(stem + '/token', token, sampled_codes[0], exact=True),
                         Comparison(stem + '/codec_sum', embeds, ref.result.codec_embeds.cpu(), dtype=torch.float32),
                     ))
+                    generated, reference_generated, suppression_masks = [], [], []
                     for group, ((logits, tokens), wanted) in enumerate(zip(
                             observed_samples, (ref.talker_logits,) + ref.predictor_logits, strict=True)):
-                        actual_logits = logits[row].float().clone()
+                        actual_logits = logits[row].clone()
+                        if group == 0:
+                            # The actual M* sampler loads BF16 readout values into
+                            # FP32 before penalty arithmetic (sampler/kernels.py).
+                            # Match that observed semantic boundary, preserving a
+                            # separate exact check on the incoming representation.
+                            target.append(Comparison(stem + f"/group{group}/readout_dtype",
+                                str(actual_logits.dtype), str(self.dtype), exact=True))
+                            actual_logits = actual_logits.float()
                         if group == 0 and prior_seen:
                             ids = torch.tensor(sorted(prior_seen), dtype=torch.long)
                             v = actual_logits[ids]
                             actual_logits[ids] = torch.where(v > 0, v / 1.1, v * 1.1)
-                        target.append(Comparison(stem + f'/group{group}/generation',
-                            GreedyOutput(actual_logits, int(tokens[row])),
-                            GreedyOutput(wanted.cpu(), int(wanted.argmax()))))
+                        generated.append(GreedyOutput(actual_logits, int(tokens[row])))
+                        reference_generated.append(GreedyOutput(wanted.cpu(), int(wanted.argmax())))
+                        suppression_masks.append(self._suppression_mask(shell, walk, group, wanted))
+                    # The depth predictor emits one autoregressive codec frame.
+                    # Teacher forcing agrees with both own histories through its
+                    # first divergence. Later comparisons are conditional
+                    # diagnostics; own-history continuations are tested below.
+                    target.append(Comparison(stem + '/generation',
+                        GreedySequence(tuple(generated)), GreedySequence(tuple(reference_generated)),
+                        suppression_mask=tuple(suppression_masks)))
                     mask = resources[TALKER_SAMPLER]._sampler.get_token_mask(rid)._seen_token_mask
                     seen = tuple(mask.nonzero().flatten().detach().cpu().tolist())
                     target.append(Comparison(stem + '/seen_tokens', seen, tuple(sorted(ref.seen_tokens)), exact=True))
@@ -325,7 +377,8 @@ class TalkerCaseAdapter:
             removed = {rids[0]} if len(rids) > 1 else set()
             for rid in removed:
                 manager.remove_request(rid)
-                self.oracle.reset(rid)
+                self.oracle.remove(rid)
+                self.history.append(('remove', rid))
             if removed:
                 active = [rid for rid in reversed(rids) if rid not in removed]
                 run('talker_decode', {rid: {'talker_input_embeds': [previous[rid]]} for rid in active},
@@ -336,7 +389,8 @@ class TalkerCaseAdapter:
             for rid in rids:
                 if rid not in removed:
                     manager.remove_request(rid)
-                    self.oracle.reset(rid)
+                    self.oracle.remove(rid)
+                    self.history.append(('remove', rid))
             if self.device.type == 'cuda':
                 torch.cuda.synchronize(self.device)
             resources[TALKER_KV].assert_pages_conserved()
@@ -348,6 +402,8 @@ class TalkerCaseAdapter:
             ))
         for observer in observations.values():
             observer.close()
+        from .qwen_speech import continuations
+        checks['talker_decode'].extend(continuations(self, name, acceleration, manager, static, details))
         return checks
 
 

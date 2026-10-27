@@ -59,5 +59,5 @@ def _greedy(logits, plan):
 
 
 def greedy_sampler(spec, info):
-    return SamplerResource(spec.vocab_size, spec.enable_repetion_penalty, torch.device("cpu"),
+    return SamplerResource(spec.vocab_size, spec.enable_repetion_penalty, info.device,
                            info.joint_comm_group, spec.enable_min_p, planned=True, sample=_greedy)

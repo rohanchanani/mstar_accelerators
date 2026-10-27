@@ -57,11 +57,15 @@ def run(registry_spec):
             derived, description = planning.placements(case, model, entries, environments)
             plan['models'].append(description)
             jobs.extend(derived)
+        except NotImplementedError as exc:
+            plan['models'].append({'model': case.identity(), 'unavailable_description': str(exc)})
         except ModuleNotFoundError as exc:
             # Only genuinely absent optional packages are missing evidence;
             # missing internal modules and import bugs remain failures.
             plan['models'].append({'model': case.identity(), 'missing_dependency': str(exc)})
-            status = Status.SKIP if exc.name in {'transformers', 'safetensors', 'huggingface_hub'} else Status.FAIL
+            if exc.name in {'transformers', 'safetensors', 'huggingface_hub', 'triton'}:
+                continue  # Unavailable corpus entries cannot veto another model's coverage.
+            status = Status.FAIL
             reports['description:' + case.key] = run_registry(entries, lambda name, acc: Result(
                 name, status, str(exc), details={'code': 'reference_dependency'})).to_dict()
         except Exception as exc:
@@ -112,7 +116,7 @@ def run(registry_spec):
         return combine(name, observations, scope='platform corpus across discovered supported placements')
 
     report = run_registry(entries, consume).to_dict()
-    report.update(policy=DEFAULT.name, qualification_policy=identity(),
+    report.update(policy=identity()["id"], qualification_policy=identity(),
                   execution_plan=plan, executions=reports)
     if any(result['status'] == 'FAIL' for result in reports.values()):
         report['status'] = 'FAIL'

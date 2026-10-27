@@ -9,7 +9,9 @@ This is not execution or qualification of the production AMD declaration.
 from dataclasses import replace
 import json
 from pathlib import Path
+import runpy
 
+import mstar
 import pytest
 import torch
 
@@ -28,9 +30,15 @@ from mstar_accelerators.testing.policy import consumer as central_consumer
 
 @pytest.fixture
 def tiny_model(tmp_path):
-    from test.fixtures.qwen3_omni.tiny_checkpoint import write_tiny_checkpoint
+    write_tiny_checkpoint = _runtime_test('fixtures/qwen3_omni/tiny_checkpoint.py')['write_tiny_checkpoint']
     write_tiny_checkpoint(tmp_path, num_code_groups=16)
     return Qwen3OmniModel.describe(model_path_hf=str(tmp_path))
+
+
+def _runtime_test(path):
+    # CPython also ships a package named ``test``. Resolve the paired M*
+    # checkout's existing fixtures explicitly instead of importing that name.
+    return runpy.run_path(str(Path(mstar.__file__).resolve().parents[1] / 'test' / path))
 
 
 def _cpu_declaration():
@@ -52,13 +60,25 @@ def _cpu_declaration():
 
 def test_actual_program_and_engine_consumed_for_every_talker_branch(tiny_model, monkeypatch):
     import mstar.engine.engine as engine_module
-    from test.modular.test_qwen3_omni_binding import _cpu_resources, _install_cpu_oracles
+    from mstar_accelerators.testing.models import qwen_speech
+    helpers = _runtime_test('modular/test_qwen3_omni_binding.py')
+    _cpu_resources, _install_cpu_oracles = helpers['_cpu_resources'], helpers['_install_cpu_oracles']
 
+    # This tiny random checkpoint rehearses execution/state plumbing, not
+    # speech quality. Production qualification always uses the real corpus.
+    monkeypatch.setattr(qwen_speech, "fixtures", lambda model, dtype: ([], None))
+    monkeypatch.setattr(qwen_speech, "continuations", lambda *args: [])
     _install_cpu_oracles(monkeypatch)
     resources = {}
     built = []
+    original_builder = engine_module.build_bound_resource
 
     def host_resource(spec, info, requests=(), **kwargs):
+        from mstar_accelerators.testing.reference_execution import _ReferenceResource
+        # The reference now has its own M* engine. Its resources must never
+        # alias the candidate's host-oracle pool or replace its sampler.
+        if not requests or any(isinstance(request, _ReferenceResource) for request in requests):
+            return original_builder(spec, info, requests, **kwargs)
         assert info.device.type == "cpu"
         if not resources:
             resources.update(_cpu_resources(tiny_model.create_submodule("Talker"),

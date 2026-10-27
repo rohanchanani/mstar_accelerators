@@ -1,90 +1,89 @@
-"""Central inference-output policy; no acceleration-owned test metadata.
+"""Central greedy-generation agreement, distinct from tensor equivalence.
 
-The reciprocal top-5 rule follows vLLM's check_logprobs_close. Histories must
-match: the reference scores the actual prefix rather than independently
-sampling a second trajectory. Exact sampler semantics are checked separately.
+vLLM's ``check_logprobs_close`` checks reciprocal membership at the first
+divergence, then stops comparing the generated sequence. Its common tests
+request five logprobs. This is not distribution equivalence or a sufficient
+speech-quality test. See docs/QUALIFICATION.md for the pinned source.
 """
 from dataclasses import dataclass
 import torch
-import torch.nn.functional as F
 
-POLICY = "generation-reciprocal-top5-ties-v2"
+POLICY = "vllm-first-divergence-top5-v2"
+TOP_K = 5
 
 @dataclass(frozen=True)
 class GreedyOutput:
     logits: torch.Tensor
     token: int
 
+
 @dataclass(frozen=True)
-class HiddenStates:
-    values: torch.Tensor
+class GreedySequence:
+    outputs: tuple[GreedyOutput, ...]
 
 
-def compare_greedy(name, actual, expected):
-    result = {"name": name, "policy": POLICY, "passed": False}
-    if not isinstance(actual, GreedyOutput):
-        return result | {"reason": "missing observed sampler input/output"}
-    a, b = (x.logits.detach().to(device="cpu", dtype=torch.float32).flatten()
-            for x in (actual, expected))
-    if actual.logits.ndim != 1 or actual.logits.shape != expected.logits.shape or a.numel() == 0:
-        return result | {"reason": "logits must be matching nonempty vocabulary vectors"}
-    if any(x.isnan().any() or x.isposinf().any() or not x.isfinite().any() for x in (a, b)):
-        return result | {"reason": "invalid logits"}
-    if not torch.equal(a.isfinite(), b.isfinite()):
-        return result | {"reason": "suppression mask mismatch"}
-    token = actual.token
-    if not 0 <= token < a.numel() or not a[token].isfinite():
-        return result | {"reason": "invalid or suppressed sampled token", "token": token}
-    # A near tie between implementations does not excuse a non-greedy sampler.
-    if a[token] != a.max():
-        return result | {"reason": "sample is not an argmax of its own penalized logits", "token": token}
-    ref_token = expected.token
-    if not 0 <= ref_token < b.numel() or b[ref_token] != b.max():
-        return result | {"reason": "reference token is not greedy"}
-    k = min(5, int(a.isfinite().sum()))
-    top_a, top_b = a.topk(k).indices, b.topk(k).indices
-    # topk's indices arbitrarily omit some tokens tied at its boundary. Rank
-    # by strictly greater scores so token numbering cannot decide acceptance.
-    rank_a = 1 + int((a > a[ref_token]).sum())
-    rank_b = 1 + int((b > b[token]).sum())
-    passed = rank_a <= k and rank_b <= k
-    log_a, log_b = a.log_softmax(-1), b.log_softmax(-1)
-    return result | {"passed": passed, "reason": "reciprocal top choices" if passed else "top choices disagree",
-        "token": token, "reference_token": ref_token, "tokens_equal": token == ref_token,
-        "top_k": k, "actual_top_ids": top_a.tolist(), "reference_top_ids": top_b.tolist(),
-        "actual_top_logits": a[top_a].tolist(), "reference_top_logits": b[top_b].tolist(),
-        "actual_rank_of_reference": rank_a,
-        "reference_rank_of_actual": rank_b,
-        "actual_logit_of_reference": float(a[ref_token]),
-        "reference_logit_of_actual": float(b[token]),
-        "actual_logprob": float(log_a[token]), "reference_logprob": float(log_b[token]),
-        "reference_regret": float(log_b[ref_token] - log_b[token])}
+def compare_greedy(name, actual, expected, *, promoted=None, suppression_mask=None):
+    from .numerics import compare
+    result = {"name": name, "passed": False, "obligations_passed": False, "policy": POLICY}
+    if not isinstance(actual, GreedyOutput) or not isinstance(expected, GreedyOutput):
+        return result | {"reason": "missing sampler observation"}
+    schema = compare(name, actual.logits, expected.logits,
+                     suppression_mask=suppression_mask, structural_only=True)
+    if not schema['passed']:
+        return result | {"reason": schema['reason'], "schema": schema}
+    for label, item in (("actual", actual), ("reference", expected)):
+        x = item.logits
+        if (x.ndim != 1 or not 0 <= item.token < x.numel()
+                or not torch.isfinite(x[item.token]) or x[item.token] != x.max()):
+            return result | {"reason": label + " token is not an own-logit argmax"}
+    # Keep numerical evidence; generation does not trigger a costly promoted
+    # execution of internal logits. Declared floating outputs still do.
+    numerical = compare(name, actual.logits, expected.logits,
+                        suppression_mask=suppression_mask)
+    result.update(numerical_diagnostic=numerical,
+                  candidate_token=actual.token, reference_token=expected.token,
+                  obligations_passed=True)
+    if actual.token == expected.token:
+        return result | {"passed": True, "reason": "same greedy token"}
+    directions = []
+    for own, other in ((actual, expected), (expected, actual)):
+        x = own.logits.detach().double().cpu()
+        rank = int((x > x[other.token]).sum()) + 1
+        gap = float(x.max() - x[other.token])
+        choices = x.topk(min(TOP_K, x.numel())).indices.tolist()
+        directions.append({"other_token_rank": rank, "logprob_gap": gap,
+                           "passed": other.token in choices})
+    return result | {"passed": all(d['passed'] for d in directions),
+                     "reason": "reciprocal top-five greedy alternatives", "directions": directions}
 
 
-def compare_hidden(name, actual, expected):
-    """Embedding direction plus magnitude, at every graph-visible token.
+def sequence_result(name, token_checks):
+    """Reduce observations of one autoregressive sequence, never independent rows.
 
-    vLLM uses cosine >= .999 for embeddings. Its scale invariance is unsafe for
-    conditioning, so also require norms close with PyTorch's BF16 defaults
-    (rtol=.016, atol=1e-5). This rule is not used for kernel unit tests.
+    Later conditional comparisons remain visible diagnostics. Their schema and
+    own-sampler obligations still gate acceptance, regardless of divergence.
     """
-    result = {"name": name, "policy": "hidden-cosine-norm-v1", "passed": False}
-    b = expected.values
-    if not isinstance(actual, torch.Tensor) or actual.shape != b.shape or actual.dtype != b.dtype:
-        return result | {"reason": "hidden-state shape/dtype mismatch"}
-    a, b = (x.detach().to(device="cpu", dtype=torch.float64) for x in (actual, b))
-    if not a.isfinite().all() or not b.isfinite().all():
-        return result | {"reason": "nonfinite hidden states"}
-    if a.numel() == 0:
-        return result | {"passed": True, "reason": "matching empty states"}
-    a, b = a.reshape(-1, a.shape[-1]), b.reshape(-1, b.shape[-1])
-    na, nb = a.norm(dim=-1), b.norm(dim=-1)
-    cosine = F.cosine_similarity(a, b, dim=-1)
-    both_zero = (na == 0) & (nb == 0)
-    cosine = torch.where(both_zero, 1., cosine)
-    magnitude = (na - nb).abs() <= 1e-5 + .016 * nb
-    passed = bool((cosine >= .999).all() and magnitude.all())
-    return result | {"passed": passed, "reason": "within embedding policy" if passed else "embedding policy exceeded",
-        "minimum_cosine": float(cosine.min()), "cosine_minimum": .999,
-        "norm_rtol": .016, "norm_atol": 1e-5,
-        "max_norm_relative_error": float(((na - nb).abs() / nb.clamp_min(1e-12)).max())}
+    first = next((i for i, check in enumerate(token_checks)
+                  if check.get('candidate_token') != check.get('reference_token')), None)
+    boundary = len(token_checks) if first is None else first + 1
+    passed = (bool(token_checks)
+              and all(check['obligations_passed'] for check in token_checks)
+              and all(check['passed'] for check in token_checks[:boundary]))
+    return dict(name=name, passed=passed, policy=POLICY,
+                reason='common-prefix generation comparison through first divergence',
+                first_divergence=first, compared_tokens=boundary,
+                token_checks=token_checks)
+
+
+def compare_sequence(name, actual, expected, *, suppression_mask=None):
+    invalid = dict(name=name, passed=False, policy=POLICY, reason='invalid sequence observations')
+    if not isinstance(actual, GreedySequence) or not isinstance(expected, GreedySequence):
+        return invalid
+    if len(actual.outputs) != len(expected.outputs):
+        return invalid
+    masks = (None,) * len(expected.outputs) if suppression_mask is None else suppression_mask
+    if len(masks) != len(expected.outputs):
+        return invalid
+    checks = [compare_greedy(f'{name}/token{i}', a, b, suppression_mask=mask)
+              for i, (a, b, mask) in enumerate(zip(actual.outputs, expected.outputs, masks))]
+    return sequence_result(name, checks)
