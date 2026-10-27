@@ -31,6 +31,10 @@ def main():
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--deployment-template", type=Path,
                         default=ROOT / "deployments/whisper_tiny_pi.yaml")
+    parser.add_argument("--cpu-ggml-library", type=Path,
+                        help="absolute path to the CPU ggml implementation")
+    parser.add_argument("--cpu-ggml-sha256",
+                        help="SHA256 from its build receipt")
     parser.add_argument("--offline", action="store_true")
     args = parser.parse_args()
     manifest = json.loads(MANIFEST.read_text())
@@ -48,6 +52,16 @@ def main():
     verify(ROOT / "tests/fixtures/whisper/jfk_tail16k.wav", manifest["audio"]["tail"])
     from mstar_accelerators.sources import normalize_source
     config = yaml.safe_load(args.deployment_template.read_text())
+    runtime = config["runtime_extension"]
+    supplied_ggml = args.cpu_ggml_library is not None or args.cpu_ggml_sha256 is not None
+    if "cpu_ggml" in runtime:
+        path, digest = args.cpu_ggml_library, args.cpu_ggml_sha256
+        if (path is None or not path.is_absolute() or digest is None or len(digest) != 64
+                or any(c not in "0123456789abcdef" for c in digest)):
+            parser.error("this template requires an absolute --cpu-ggml-library and lowercase --cpu-ggml-sha256")
+        runtime["cpu_ggml"] = {"library": str(path), "sha256": digest}
+    elif supplied_ggml:
+        parser.error("this template does not request a CPU ggml artifact")
     config["runtime_extension"]["accelerations"] = normalize_source(
         config["runtime_extension"]["accelerations"], relative_to=ROOT)
     config["model_kwargs"]["model_path_hf"] = str(checkpoint)
