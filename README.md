@@ -241,15 +241,15 @@ Generic resource algorithms and serving machinery stay in **M***. The registry,
 generator, binder and qualification harness also live here; they are not another
 server or another source of request state. [Detailed runtime responsibilities](docs/MSTAR_CHANGES.md).
 
-[binding]: https://github.com/rohanchanani/mstar-amd-c/blob/555f4845cbe878890e2fb2d5eed01dd6528a6892/mstar/model/binding.py
-[execution]: https://github.com/rohanchanani/mstar-amd-c/blob/555f4845cbe878890e2fb2d5eed01dd6528a6892/mstar/engine/execution.py
-[engine]: https://github.com/rohanchanani/mstar-amd-c/blob/555f4845cbe878890e2fb2d5eed01dd6528a6892/mstar/engine/engine.py
-[resources]: https://github.com/rohanchanani/mstar-amd-c/blob/555f4845cbe878890e2fb2d5eed01dd6528a6892/mstar/engine/resources/binding.py
-[agreement]: https://github.com/rohanchanani/mstar-amd-c/blob/555f4845cbe878890e2fb2d5eed01dd6528a6892/mstar/distributed/execution.py
-[kv]: https://github.com/rohanchanani/mstar-amd-c/blob/555f4845cbe878890e2fb2d5eed01dd6528a6892/mstar/engine/resources/kv/plan.py
-[sampler]: https://github.com/rohanchanani/mstar-amd-c/blob/555f4845cbe878890e2fb2d5eed01dd6528a6892/mstar/engine/resources/sampler/resource.py
-[positions]: https://github.com/rohanchanani/mstar-amd-c/blob/555f4845cbe878890e2fb2d5eed01dd6528a6892/mstar/engine/resources/position/manager.py
-[views]: https://github.com/rohanchanani/mstar-amd-c/blob/555f4845cbe878890e2fb2d5eed01dd6528a6892/mstar/engine/resources/sequence.py
-[platforms]: https://github.com/rohanchanani/mstar-amd-c/blob/555f4845cbe878890e2fb2d5eed01dd6528a6892/mstar/platforms/interface.py
-[qwen]: https://github.com/rohanchanani/mstar-amd-c/blob/555f4845cbe878890e2fb2d5eed01dd6528a6892/mstar/model/qwen3_omni/thinker_logical.py
-[contracts]: https://github.com/rohanchanani/mstar-amd-c/blob/555f4845cbe878890e2fb2d5eed01dd6528a6892/mstar/model/contract.py
+[binding]: https://github.com/rohanchanani/mstar/blob/555f4845cbe878890e2fb2d5eed01dd6528a6892/mstar/model/binding.py
+[execution]: https://github.com/rohanchanani/mstar/blob/555f4845cbe878890e2fb2d5eed01dd6528a6892/mstar/engine/execution.py
+[engine]: https://github.com/rohanchanani/mstar/blob/555f4845cbe878890e2fb2d5eed01dd6528a6892/mstar/engine/engine.py
+[resources]: https://github.com/rohanchanani/mstar/blob/555f4845cbe878890e2fb2d5eed01dd6528a6892/mstar/engine/resources/binding.py
+[agreement]: https://github.com/rohanchanani/mstar/blob/555f4845cbe878890e2fb2d5eed01dd6528a6892/mstar/distributed/execution.py
+[kv]: https://github.com/rohanchanani/mstar/blob/555f4845cbe878890e2fb2d5eed01dd6528a6892/mstar/engine/resources/kv/plan.py
+[sampler]: https://github.com/rohanchanani/mstar/blob/555f4845cbe878890e2fb2d5eed01dd6528a6892/mstar/engine/resources/sampler/resource.py
+[positions]: https://github.com/rohanchanani/mstar/blob/555f4845cbe878890e2fb2d5eed01dd6528a6892/mstar/engine/resources/position/manager.py
+[views]: https://github.com/rohanchanani/mstar/blob/555f4845cbe878890e2fb2d5eed01dd6528a6892/mstar/engine/resources/sequence.py
+[platforms]: https://github.com/rohanchanani/mstar/blob/555f4845cbe878890e2fb2d5eed01dd6528a6892/mstar/platforms/interface.py
+[qwen]: https://github.com/rohanchanani/mstar/blob/555f4845cbe878890e2fb2d5eed01dd6528a6892/mstar/model/qwen3_omni/thinker_logical.py
+[contracts]: https://github.com/rohanchanani/mstar/blob/555f4845cbe878890e2fb2d5eed01dd6528a6892/mstar/model/contract.py

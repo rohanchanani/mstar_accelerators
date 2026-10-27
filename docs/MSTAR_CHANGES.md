@@ -2,6 +2,8 @@
 
 This maps the integrated fork pinned by [MSTAR_REVISION](../MSTAR_REVISION).
 Changes are grouped by responsibility rather than hardware or development history.
+The fork is based on upstream `887c499fc0c7bc3eae249743c01208b7eb3a6a3e`;
+[review the complete diff](https://github.com/rohanchanani/mstar/compare/887c499fc0c7bc3eae249743c01208b7eb3a6a3e...555f4845cbe878890e2fb2d5eed01dd6528a6892).
 
 ## Integration contracts and consumers
 
