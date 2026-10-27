@@ -72,7 +72,7 @@ acceleration = Acceleration(
         When(Eq('graph_walk', 'prefill'), Eq('tp_size', 1), Eq('sp_size', 1)),
         Eq('batch_size', 1),
         Eq('token_lengths', (4,)),
-        AllRows(Resources.sampler, When(Eq('temperature', 0.0), Eq('repetition_penalty', 1.0))),
+        AllRows(Resources.sampler, When(Eq('temperature', 0.0), Eq('repetition_penalty', 1.0), Eq('min_tokens', 0))),
         Eq('config.d_model', 384),
         Eq('config.decoder_layers', 4),
         Eq('config.decoder_attention_heads', 6),

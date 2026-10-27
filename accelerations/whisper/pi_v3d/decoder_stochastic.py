@@ -105,6 +105,8 @@ acceleration = Acceleration(
             Range('temperature', GREEDY_TEMPERATURE, float(torch.finfo(torch.float32).max)),
             Eq('top_k', 0), Eq('top_p', 1.0), Eq('min_p', 0.0),
             Eq('repetition_penalty', 1.0),
+            Eq('repetition_window', 0), Eq('min_tokens', 0),
+            Eq('top_p_first', False), Eq('top_p_min_keep', 1),
         )),
         Eq('config.d_model', 384),
         Eq('config.decoder_layers', 4),

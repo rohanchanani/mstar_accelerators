@@ -48,7 +48,7 @@ prefill/decode support, sampling conditions and runtime-owned KV views:
 ```python
 acceleration = Acceleration(
     reference=WhisperDecoderSubmodule,
-    when=When(common, Or(greedy, stochastic), CPUTokenDecoderAvailable(readout_format="q4_0_kai")),
+    when=When(common, sampling_policy, CPUTokenDecoderAvailable(readout_format="q4_0_kai")),
     implementation=Implementation(
         prepare=partial(prepare, sample_tokens=categorical_token, readout_format="q4_0_kai"),
         resources=resource_requests,
