@@ -107,7 +107,8 @@ class NodeCaseAdapter:
 
     @torch.no_grad()
     def _run(self, candidate, batches, details, *, promoted=False):
-        config = {'max_concurrent_requests': max(batches), 'autocast_dtype': 'bfloat16',
+        config = {'node_groups': [{'node_names': [self.node]}],
+                  'max_concurrent_requests': max(batches), 'autocast_dtype': 'bfloat16',
                   'resources': {THINKER_KV: {'max_bytes': 3 * 1024**3, 'prefix_cache': False}},
                   'runtime_extension': {'nodes': [self.node] if candidate else []}}
         if candidate is None:

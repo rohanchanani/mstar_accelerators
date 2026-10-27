@@ -212,7 +212,8 @@ def continuations(adapter, name, acceleration, manager, static, details):
         references[case['id']] = _reference(adapter, case)
     decoder = EngineManager()
     adapter.session.managers.append(decoder)
-    decoder.load({'Code2Wav'}, adapter.device, {'max_concurrent_requests': 1, 'autocast_dtype': str(adapter.dtype).removeprefix('torch.')},
+    decoder.load({'Code2Wav'}, adapter.device, {'node_groups': [{'node_names': ['Code2Wav']}],
+                 'max_concurrent_requests': 1, 'autocast_dtype': str(adapter.dtype).removeprefix('torch.')},
                  WorkerParallelGroups(1, 0), None, adapter.model, None)
     # Compilation on first execution is the ordinary Code2Wav behavior. There
     # is no full-service startup or unrelated capture-bucket warmup campaign.

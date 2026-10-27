@@ -35,7 +35,7 @@ WALKS = ('talker_prefill', 'talker_last_prefill', 'talker_decode')
 
 
 def _configuration(options):
-    config = {}
+    config = {'node_groups': [{'node_names': ['Talker']}]}
     config['max_concurrent_requests'] = max(QWEN_BATCHES)
     config['runtime_extension'] = {'nodes': ['Talker']}
     config.setdefault('autocast_dtype', options.get('dtype', 'bfloat16'))
