@@ -1,5 +1,10 @@
 # Run from mstar_accelerators, or render acceleration/checkpoint paths absolute.
 model: qwen3_omni
+model_kwargs:
+  # Preserve the measured service cadence; upstream also supports an initial ramp.
+  codec_chunk_schedule: []
+  codec_chunk_frames: 25
+  codec_left_context_frames: 25
 device_type: cuda
 autocast_dtype: bfloat16
 max_seq_len: 32768
