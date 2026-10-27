@@ -56,6 +56,22 @@ def _shape(shape, *, tokens, batch):
     return tuple(dimensions[value] if isinstance(value, str) else value for value in shape)
 
 
+def _prepared_shape(shape):
+    """Specialize fixed axes; token and batch extents remain invocation data."""
+    shape = tuple(shape)
+    if not any(isinstance(axis, str) for axis in shape):
+        return lambda _tokens, _batch: shape
+    if shape == ("tokens",):
+        return lambda tokens, _batch: (tokens,)
+    if shape == ("batch",):
+        return lambda _tokens, batch: (batch,)
+    return lambda tokens, batch: _shape(shape, tokens=tokens, batch=batch)
+
+
+def _identity_plan(plan):
+    return plan
+
+
 class DefaultBinding:
     """Compile named logical fields into ordinary Torch arguments and results.
 
@@ -72,13 +88,37 @@ class DefaultBinding:
         self.output_type = output_type or self.contract.result_type
         self.call_type = call_type
         self.plan_type = plan_type
+        # These are placement products, not invocation state.
+        self._inputs = tuple((spec, tuple(spec.source.split(".")),
+                              spec.dtype or binding.dtype, _prepared_shape(spec.shape))
+                             for spec in self.contract.inputs)
+        self._outputs = tuple((spec, spec.dtype or binding.dtype, _prepared_shape(spec.shape))
+                              for spec in self.contract.outputs)
+        self._plan_converters = {key: getattr(resource, "logical_use", _identity_plan)
+                                 for key, resource in resources.items()}
+        self._simple_shapes = (
+            self.contract.dimensions is None
+            and all(not isinstance(axis, str) or axis in ("tokens", "batch")
+                    for spec in self.contract.inputs for axis in spec.shape)
+            and all(spec.present_when is None and not isinstance(spec.dtype, tuple)
+                    and all(not isinstance(axis, str) or axis == "batch" for axis in spec.shape)
+                    for spec in self.contract.outputs)
+        )
 
     def materialize(self, invocation, execution):
         del execution
         batch = len(invocation.inputs)
         row_walks = invocation.row_walks or (invocation.graph_walk,) * batch
+        if self._simple_shapes:
+            # Preserve row_dimensions' validation without rebuilding a dimension
+            # mapping for every field of an ordinary fixed contract.
+            for logical in invocation.inputs:
+                if hasattr(logical, "input_seq_len"):
+                    tokens = logical.input_seq_len
+                    if type(tokens) is not int or tokens < 0:
+                        raise ValueError("logical dimensions must be nonnegative integers")
         inputs = {}
-        for spec in self.contract.inputs:
+        for spec, components, dtype, shape in self._inputs:
             if spec.walks and not any(walk in spec.walks for walk in row_walks):
                 inputs[spec.name] = ()
                 continue
@@ -88,21 +128,37 @@ class DefaultBinding:
                     rows.append(None)
                     continue
                 value = logical
-                for component in spec.source.split("."):
+                for component in components:
                     value = value[component] if isinstance(value, Mapping) else getattr(value, component)
-                expected = tensor_shape(spec, row_dimensions(self.contract, logical, walk, None, batch))
+                expected = (shape(getattr(logical, "input_seq_len", None), batch)
+                            if self._simple_shapes else
+                            tensor_shape(spec, row_dimensions(self.contract, logical, walk, None, batch)))
                 if tuple(value.shape) != expected:
                     raise ValueError(f"{spec.name}: expected logical shape {expected}, got {tuple(value.shape)}")
-                rows.append(value.to(dtype=spec.dtype or self.binding.dtype).contiguous().to(
-                    self.binding.device, non_blocking=True))
+                if (type(value) is torch.Tensor and self.binding.device.type == "cpu"
+                        and value.device == self.binding.device
+                        and value.dtype == dtype and value.is_contiguous()):
+                    rows.append(value)
+                else:
+                    rows.append(value.to(dtype=dtype).contiguous().to(
+                        self.binding.device, non_blocking=True))
             inputs[spec.name] = tuple(rows)
-        outputs = allocate_results(self.contract, invocation.inputs, invocation.engine_inputs,
-                                   self.binding.dtype, self.binding.device)
+        if self._simple_shapes:
+            outputs = {}
+            for spec, dtype, shape in self._outputs:
+                extent = shape(None, batch)
+                if spec.per_request:
+                    outputs[spec.name] = tuple(torch.empty(extent, dtype=dtype, device=self.binding.device)
+                                               for _ in range(batch))
+                else:
+                    outputs[spec.name] = torch.empty(extent, dtype=dtype, device=self.binding.device)
+        else:
+            outputs = allocate_results(self.contract, invocation.inputs, invocation.engine_inputs,
+                                       self.binding.dtype, self.binding.device)
         return self.call_type(graph_walk=invocation.graph_walk, inputs=self.input_type(**inputs),
                               outputs=self.output_type(**outputs),
                               plan_results=self.plan_type(**{
-                                  key: self.resources[key].logical_use(plan)
-                                  if hasattr(self.resources[key], "logical_use") else plan
+                                  key: self._plan_converters[key](plan)
                                   for key, plan in invocation.plan_results.items()
                               }), row_walks=row_walks)
 

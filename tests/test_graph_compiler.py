@@ -9,6 +9,7 @@ from mstar.engine.execution import Execution, InvocationFacts, LogicalInvocation
 from mstar.engine.resources.attn.config import AttentionConfig, AttentionSpec
 from mstar.engine.resources.kv.config import KVSpec, PagedKVConfig, ResolvedSequenceConfig
 from mstar.engine.resources.kv.plan import KVWritePlan
+from mstar.engine.resources.kv.encoding import PlainKVEncoding
 from mstar.engine.resources.sampler.config import SamplerSpec
 from mstar.engine.resources.sampler.plan import SamplingPlan
 from mstar.engine.resources.sequence_view import (
@@ -101,7 +102,7 @@ def test_generic_state_views_preserve_the_runtime_storage_across_walks():
     config = PagedKVConfig(num_layers=1, num_kv_heads=1, head_dim=2,
                           max_seq_len=4, max_num_pages=3, page_size=2, prefix_cache=False)
     storage = torch.zeros(1, 3, 2, 2, 1, 2)
-    resource = SimpleNamespace(config=config, kv_cache=SimpleNamespace(tensor=storage))
+    resource = SimpleNamespace(config=config, kv_cache=SimpleNamespace(tensor=storage, dtype=storage.dtype, encoding=PlainKVEncoding(storage.dtype)))
     resource.view = lambda request: PagedSequenceAccess(resource, request)
     resource.logical_use = lambda plans: {
         label: SequenceUse((17,), (label,), (1,), (1,), (0,), plan)
@@ -181,9 +182,10 @@ def test_default_call_preserves_mixed_walk_input_row_correspondence():
 def test_dense_graph_ports_borrow_cache_aliases_and_owned_append_positions():
     config = ResolvedSequenceConfig(num_layers=1, num_kv_heads=1, head_dim=2,
                                     max_seq_len=4, max_num_pages=3, page_size=4,
-                                    prefix_cache=False, dense=True)
+                                    prefix_cache=False, dense=True, encoding=PlainKVEncoding(torch.float32),
+                                    inherited_encoding=PlainKVEncoding(torch.float32))
     storage = torch.arange(48.).reshape(1, 3, 2, 4, 1, 2)
-    resource = SimpleNamespace(config=config, kv_cache=SimpleNamespace(tensor=storage))
+    resource = SimpleNamespace(config=config, kv_cache=SimpleNamespace(tensor=storage, dtype=storage.dtype, encoding=PlainKVEncoding(storage.dtype)))
     resource.view = lambda request: sequence_access(resource, request)
     resource.logical_use = lambda plans: {
         label: SequenceUse.from_plan(plan) for label, plan in plans.items()}
