@@ -6,12 +6,15 @@ import logging
 from mstar.engine.execution import ExecutionCapabilities, ExecutionOption, InvocationFacts, Support
 from mstar.engine.tensor_forward import TensorForward, bind_tensor_forward
 from mstar.engine.resources.binding import merge_resource_requests
+from mstar.engine.resources.kv.config import KVSpec, PagedKVConfig, SequenceKVConfig
+from mstar.engine.resources.sequence import SequenceEncoding
 from mstar.model.binding import NodeAssembly
 
 from .binding import invocation_facts, static_facts
 from .compiler import PreparationScope, bind_tensor_result
 from .conditions import Constant, Or, Range, batch_bound
 from .definition import Acceleration, TensorForwardExecution
+from .evaluation import prepare_evaluator
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +42,9 @@ class Registry:
             )
         declared = {spec.resource_key for spec in binding.resource_specs
                     if binding.node_name in spec.nodes}
+        sequence_keys = {spec.resource_key for spec in binding.resource_specs
+                         if isinstance(spec, KVSpec) and binding.node_name in spec.nodes
+                         and isinstance(spec.config, (SequenceKVConfig, PagedKVConfig))}
         for name, acceleration in self.accelerations.items():
             if acceleration.reference is not type(binding.submodule):
                 continue
@@ -66,6 +72,12 @@ class Registry:
             requested = requested(scoped_binding) if callable(requested) else requested
             if foreign := requested.keys() - declared:
                 raise ValueError(f"{name}: undeclared resource requests {sorted(foreign)}")
+            # Omission preserves inherited storage semantics for this consumer.
+            # It must not disappear when a sibling requests an explicit format.
+            requested = dict(requested)
+            for key in sequence_keys:
+                if key not in requested or requested[key] == ():
+                    requested[key] = SequenceEncoding()
             resource_requests = merge_resource_requests(resource_requests, {
                 key: value if isinstance(value, tuple) else (value,)
                 for key, value in requested.items()
@@ -135,7 +147,13 @@ class Registry:
                         prepared = acceleration.implementation.prepare(local_binding, resources)
                         pending = prepared
 
-                    def supports(facts, condition=condition, local=local):
+                    evaluate = prepare_evaluator(condition)
+                    local_evaluators = {walk: prepare_evaluator(residual)
+                                        for walk, residual in local.items()}
+                    admission_evaluator = prepare_evaluator(Or(*local.values()))
+
+                    def supports(facts, evaluate=evaluate, local=local_evaluators,
+                                 admission_evaluator=admission_evaluator):
                         values = invocation_facts(facts)
                         if facts.row_walks is not None:
                             if any(walk not in local for walk in facts.row_walks):
@@ -144,13 +162,13 @@ class Registry:
                                 # Mixed composition is an invocation fact. Do not
                                 # silently turn a supporting program into uniform
                                 # batches, or mistake the queue label for a row walk.
-                                return condition.evaluate(values)
+                                return evaluate(values)
                         if facts.graph_walk is None:
                             # Request admission has policy facts, not a proposed
                             # shape or walk. Only conclusive rejection is useful.
-                            return Or(*local.values()).evaluate(values)
+                            return admission_evaluator(values)
                         residual = local.get(facts.graph_walk)
-                        return Support.NO if residual is None else residual.evaluate(values)
+                        return Support.NO if residual is None else residual(values)
 
                     execution = acceleration.implementation.execution
                     # The common lifecycle prepares rows inline. Programs with
