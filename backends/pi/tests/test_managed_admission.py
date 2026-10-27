@@ -165,7 +165,8 @@ def test_environment_borrow_has_independent_close_but_the_same_lease(lease, monk
     assert not _lock_is_held(Path(lock.name))
 
 
-def test_managed_launcher_passes_the_real_descriptor_and_observes_release(tmp_path, monkeypatch):
+@pytest.mark.parametrize("exit_status", [0, 7])
+def test_managed_launcher_passes_the_real_descriptor_and_observes_release(tmp_path, monkeypatch, exit_status):
     # Supply the real pure-Python admission module without loading the target
     # native extension in this host test process.
     package = ModuleType("mstar_pi")
@@ -181,10 +182,11 @@ owner = context.reserve('native-free child')
 owner.activate()
 owner.release()
 context.close()
+raise SystemExit(int(sys.argv[2]))
 """
-    result = guard.admit([sys.executable, "-c", code, str(ROOT / "torch/mstar_pi")],
+    result = guard.admit([sys.executable, "-c", code, str(ROOT / "torch/mstar_pi"), str(exit_status)],
                          10, tmp_path, BOOT, managed=True)
-    assert result == 0
+    assert result == exit_status
     assert not (tmp_path / "inflight.json").exists()
     assert not (tmp_path / "quarantine.json").exists()
     records = [json.loads(path.read_text()) for path in tmp_path.glob("sessions/*/owner-*.json")]

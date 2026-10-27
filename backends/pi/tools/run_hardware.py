@@ -3,7 +3,7 @@
 
 Unlike the old diagnostic runner, a deadline or signal never kills a child
 that may own submitted GPU work. The lease stays held while it is alive. A
-same-boot failure marker blocks later launchers, including the old launcher.
+same-boot uncertainty marker blocks later launchers, including the old launcher.
 This is a test-admission tool, not the backend's completion mechanism.
 """
 from __future__ import annotations
@@ -191,18 +191,22 @@ def admit(command: list[str], deadline_seconds: float, state: Path, boot: str, *
                 if marker["boot_id"] == boot:
                     quarantine_reason = marker["reason"]
 
-        # Any failed qualification is preserved as a same-boot quarantine.
-        # We deliberately do not infer safe settlement from arbitrary exit codes.
-        if status != 0 or quarantine_reason is not None:
+        # Managed completion is established by the sealed owner roster above,
+        # independently of the test verdict. Unmanaged failures have no such
+        # acknowledgement; native uncertainty still requires recovery.
+        if (status != 0 and not managed) or quarantine_reason is not None:
             reason = quarantine_reason or f"qualification exited with status {status}"
             marker_path = state / "quarantine.json"
             if not marker_path.exists() or json.loads(marker_path.read_text())["boot_id"] != boot:
                 atomic_json(marker_path, {**record, "status": status, "reason": reason})
             return 124 if quarantine_reason else (128 - status if status < 0 else status)
 
+        result = {**record, "status": "PASS" if status == 0 else "FAIL", "child_status": status}
+        if context is not None:
+            atomic_json(context.directory / "result.json", result)
         (state / "inflight.json").unlink()
-        print(json.dumps({"status": "PASS", "boot_id": boot, "child_status": status}), flush=True)
-        return 0
+        print(json.dumps(result), flush=True)
+        return 128 - status if status < 0 else status
 
 
 def main() -> int:
