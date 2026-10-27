@@ -204,20 +204,23 @@ def transcribe(url, audio, expected, output, name, timeout, *, stream=False, can
         save(output / f"{name}.json", record)
 
 
-def reject_unsupported_sampling(url, audio, output, timeout):
-    """The authored support union rejects canonical policy at request admission."""
+def check_sampling_policy(url, audio, output, timeout, *, supported):
+    """Exercise CPU sampler controls or the native GPU support refusal."""
     with audio.open("rb") as source:
         response = requests.post(url + "/v1/audio/transcriptions",
                                  files={"file": (audio.name, source, "audio/wav")},
                                  data={"model": "whisper", "language": "en", "temperature": "0.5",
                                        "top_p": "0.9"},
                                  timeout=(5, timeout))
-    record = {"case": "06_unsupported_sampling", "http_status": response.status_code,
+    passed = (response.status_code == 200 and bool(response.json().get("text", "").strip())
+              if supported else response.status_code == 400
+              and "request policy is unsupported" in response.text.lower())
+    record = {"case": "06_sampling_policy", "http_status": response.status_code,
               "body": response.text, "temperature": .5, "top_p": .9,
-              "passed": response.status_code == 400 and "request policy is unsupported" in response.text.lower()}
-    save(output / "06_unsupported_sampling.json", record)
+              "supported": supported, "passed": passed}
+    save(output / "06_sampling_policy.json", record)
     if not record["passed"]:
-        raise AssertionError("unsupported sampling did not receive the declared policy rejection")
+        raise AssertionError("sampling request did not match the declared policy support")
     return record
 
 
@@ -497,8 +500,8 @@ def main():
                 report["cases"].extend(future.result() for future in requests_in_flight)
             report["cases"].append(run(tail, expected_tail, "04_stream", stream=True))
             report["cases"].append(run(full, expected_full, "05_cancel", stream=True, cancel=True))
-            report["cases"].append(reject_unsupported_sampling(url, full, output, args.request_timeout))
-            report["cases"].append(run(full, expected_full, "07_after_cancel_and_rejection"))
+            report["cases"].append(check_sampling_policy(url, full, output, args.request_timeout, supported=cpu))
+            report["cases"].append(run(full, expected_full, "07_after_cancel_and_sampling"))
             if args.stochastic_temperature is not None:
                 # Record the phase boundary: one implementation may legitimately
                 # support both policies, so implementation names need not differ.

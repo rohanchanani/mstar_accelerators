@@ -189,8 +189,8 @@ def main(argv: list[str] | None = None) -> None:
     args.mstar_root = args.mstar_root.resolve()
     deployment = args.deployment.resolve()
     config = yaml.safe_load(deployment.read_text())
-    if config.get("runtime_extension", {}).get("nodes") != ["Talker"]:
-        raise ValueError("this baseline requires the explicit external Talker selection")
+    if config.get("runtime_extension", {}).get("nodes") != ["Thinker", "Talker", "audio_encoder"]:
+        raise ValueError("this baseline requires the supplied AMD acceleration selection")
     # Refuse an occupied port instead of accidentally probing a different service.
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", args.port))
