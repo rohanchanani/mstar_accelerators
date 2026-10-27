@@ -55,3 +55,29 @@ def test_promoted_execution_is_lazy_and_cannot_rescue_schema_failures():
     assert calls == []
     assert compare('x', torch.full_like(e, 1.018), e, promoted=higher)['passed']
     assert calls == [True]
+
+
+@pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16, torch.float64])
+@pytest.mark.parametrize('error', [0., .018, .2])
+def test_internal_mixed_dtype_uses_pinned_decision(dtype, error):
+    h = torch.ones(1024, dtype=torch.float64)
+    eager = (h + .01).float()
+    actual = (h + error).to(dtype)
+    assert compare('operand', actual, eager, promoted=h, internal=True)['passed'] == bool(
+        same(eager, actual, h, **(UPSTREAM_OPTIONS | {'exact_dtype': False})))
+    assert not compare('output', actual, eager, promoted=h)['passed']
+
+
+def test_internal_observation_keeps_schema_exactness_and_suppression():
+    e = torch.tensor([-float('inf'), 1., 2.])
+    a = e.double()
+    mask = torch.tensor([True, False, False])
+    assert compare('operand', a, e, internal=True, suppression_mask=mask)['passed']
+    for options in ({'exact': True}, {'dtype': torch.float32}):
+        assert not compare('operand', a, e, internal=True, **options)['passed']
+    assert not compare('state', torch.ones(3, dtype=torch.int32),
+                       torch.ones(3, dtype=torch.int64), internal=True)['passed']
+    a[1] = 100.
+    assert not compare('operand', a, e, internal=True, suppression_mask=mask)['passed']
+    a[1] = -float('inf')
+    assert not compare('operand', a, e, internal=True, suppression_mask=mask)['passed']

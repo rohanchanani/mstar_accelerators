@@ -6,6 +6,7 @@ the interpretation of missing evidence, and per-acceleration verdicts.
 """
 from __future__ import annotations
 
+import gc
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
@@ -81,6 +82,7 @@ class Comparison:
     dtype: Any = None
     promoted: Any = None
     suppression_mask: Any = None
+    internal: bool = False
 
 
 @dataclass(frozen=True)
@@ -174,6 +176,10 @@ class DifferentialConsumer:
             case["comparisons"] = len(observed)
             empty_case |= not observed
             checks.extend(observed)
+            # Comparisons have been reduced to report values. Reclaim cycles
+            # between reference programs, engines and lazy-reference closures
+            # before allocating the next case, not at an arbitrary GC threshold.
+            gc.collect()
         details["coverage"]["complete_in_adapter_domain"] = not (incomplete or empty_case)
         checks = tuple(checks)
         if not checks:

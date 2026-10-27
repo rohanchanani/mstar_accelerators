@@ -90,5 +90,5 @@ def quality_comparator(acceleration, observation):
             and observation.actual.is_floating_point()):
         return compare(observation.name, observation.actual, observation.expected,
                        dtype=observation.dtype, suppression_mask=observation.suppression_mask,
-                       structural_only=True)
+                       structural_only=True, internal=observation.internal)
     return differential_comparator(acceleration, observation)

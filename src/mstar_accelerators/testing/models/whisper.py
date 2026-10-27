@@ -9,6 +9,7 @@ prefill when the corpus has no distinct compatible producer.
 """
 from __future__ import annotations
 
+import gc
 import importlib.util
 import hashlib
 from contextlib import nullcontext
@@ -138,6 +139,10 @@ class WhisperCaseAdapter:
                 encoder_binding = replace(binding, submodule=encoder_shell,
                                           node_name="audio_encoder", prepared={})
                 states = self._encode(encoder_binding, torch.float32)
+            # Initial CPU reference execution has finished; states own a clone.
+            # Do not carry its encoder/engine allocation into candidate setup.
+            self.session.close()
+            gc.collect()
         trajectories = {"policy": "one-compatible-prefill-per-decode-witness-v2",
                         "selection": "first distinct compatible registration by sorted name, then the decode registration's own prefill",
                         "scope": "bounded registered trajectories, not all pairs",
@@ -372,6 +377,9 @@ class WhisperCaseAdapter:
                     higher_values[i] = {'logits': precise.logits.detach().cpu().clone(),
                         **{key: precise.resources[key].kv_cache.tensor[:, list(live_pages(plans, key, rid))].detach().clone()
                            for key in (KV_CACHE, CROSS_KV_CACHE)}}
+                # Comparison runs after candidate settlement. The promoted
+                # replay now owns copied observations, not live runtime state.
+                self.session.close()
             return higher_values[index][key]
         if companion is not None:
             trajectory["resolved_resources"] = {
@@ -505,7 +513,7 @@ class WhisperCaseAdapter:
             mask = torch.zeros_like(expected_logits, dtype=torch.bool)
             mask[:, self.model.config.suppressed_tokens(selected_walk)] = True
             checks.append(Comparison("logits", actual_logits, expected_logits,
-                                     promoted=lambda index=reference_cases[selected_walk][2]: higher(index, 'logits'), suppression_mask=mask))
+                                     promoted=lambda index=reference_cases[selected_walk][2]: higher(index, 'logits'), suppression_mask=mask, internal=True))
             checks.extend(self._replica_checks(observed))
             pages = {}
             for key in (KV_CACHE, CROSS_KV_CACHE):

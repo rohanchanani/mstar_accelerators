@@ -4,6 +4,7 @@ This host has no model names, model constructors, reference policy, tolerances,
 or case recipes. It transports a derived job to actual workers and preserves
 release/uncertainty semantics. The central model consumer owns the cases.
 """
+import gc
 import json
 import multiprocessing as mp
 from pathlib import Path
@@ -100,6 +101,7 @@ class Worker:
             result = consumer(name, acceleration)
             self.extension.drain()
             self.session.close()
+            gc.collect()
             finished = control.all_gather_object(name)
             if any(value != name for value in finished):
                 raise ValueError('workers left registry entry out of order')

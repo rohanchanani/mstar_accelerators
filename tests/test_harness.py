@@ -243,3 +243,29 @@ def test_sweep_execution_failure_prevents_later_alternatives():
     with pytest.raises(RuntimeError, match="drain"):
         consumer("one-registration", declaration)
     assert entered == [1]
+
+
+def test_case_reference_cycles_released_after_comparison_before_next_case():
+    import gc
+    import weakref
+    roots = []
+    class ReferenceOwner:
+        pass
+    def execute(witness):
+        assert all(root() is None for root in roots)
+        owner = ReferenceOwner()
+        owner.cycle = owner
+        roots.append(weakref.ref(owner))
+        return [Comparison('value', 1, 1, promoted=lambda: owner)]
+    declaration = Acceleration(Reference, Or(Eq('walk', 'a'), Eq('walk', 'b')),
+                               Implementation(lambda binding, resources: None))
+    consumer = DifferentialConsumer({Reference: lambda *_: CasePlan(
+        {}, {'walk': ('a', 'b')}, execute, 'reference', 'host')}, exact_comparator)
+    enabled = gc.isenabled()
+    gc.disable()
+    try:
+        assert consumer('cycle', declaration).status is Status.PASS
+        assert len(roots) == 2 and all(root() is None for root in roots)
+    finally:
+        if enabled:
+            gc.enable()

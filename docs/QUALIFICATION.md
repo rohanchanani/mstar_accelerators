@@ -181,7 +181,14 @@ For one declared floating tensor:
    multiplier * RMSE(eager, fp64) + 1e-4`. The multiplier is 3 for FP16/BF16
    and 2 otherwise, with the upstream small-tensor/spatial-1x1 adjustment to 3.
 
-Fixed options are `equal_nan=True`, `exact_dtype=True`, `ignore_non_fp=False`,
+Internal floating observations, such as sampler operands, have no declared
+storage dtype. The central case constructor marks these observations; they use
+the same upstream comparator with `exact_dtype=False` (including its reference
+conversion to the observed dtype). Shape, finiteness, suppression and all
+numerical thresholds remain unchanged. Explicit dtype requirements, public
+outputs, discrete observations and runtime state retain exact dtype checks.
+
+Default options are `equal_nan=True`, `exact_dtype=True`, `ignore_non_fp=False`,
 `cos_similarity=False`, `use_larger_multiplier_for_smaller_tensor=False`, and
 `force_max_multiplier=False`. The logical finite-payload safeguard runs before
 this helper; enabling upstream `equal_nan` does not authorize invalid model

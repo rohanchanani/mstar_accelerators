@@ -10,8 +10,8 @@ UPSTREAM_OPTIONS = dict(tol=1e-3, equal_nan=True, exact_dtype=True,
 
 
 def compare(name, actual, expected, *, exact=False, dtype=None, promoted=None,
-            suppression_mask=None, structural_only=False):
-    """Compare one declared tensor; never regroup rows or cast away its dtype.
+            suppression_mask=None, structural_only=False, internal=False):
+    """Compare a declared output/state tensor or an internal numerical observation.
 
     Suppression is a semantic mask supplied by the case constructor, not inferred
     from candidate errors. Ordinary outputs must be finite. Discrete values and
@@ -25,12 +25,17 @@ def compare(name, actual, expected, *, exact=False, dtype=None, promoted=None,
             raise TypeError("non-tensor observations require exact comparison")
         passed = type(actual) is type(expected) and actual == expected
         return result | {"policy": "exact-v1", "passed": bool(passed), "reason": "exact value comparison"}
-    required = expected.dtype if dtype is None else dtype
+    # Internal arithmetic has no public dtype obligation. Explicit schemas and
+    # discrete/exact observations remain strict, even at an internal boundary.
+    mixed = (internal and not exact and dtype is None
+             and actual.is_floating_point() and expected.is_floating_point())
+    required = None if mixed else expected.dtype if dtype is None else dtype
     result.update(shape=list(actual.shape), actual_dtype=str(actual.dtype),
-                  reference_dtype=str(expected.dtype), required_dtype=str(required))
+                  reference_dtype=str(expected.dtype), required_dtype=None if required is None else str(required),
+                  observation="internal" if internal else "output_or_state")
     if actual.shape != expected.shape:
         return result | {"reason": "shape mismatch"}
-    if actual.dtype != required or expected.dtype != required:
+    if required is not None and (actual.dtype != required or expected.dtype != required):
         return result | {"reason": "output/reference dtype mismatch"}
     a, b = actual.detach().cpu(), expected.detach().cpu()
     if exact or not (a.is_floating_point() or a.is_complex()):
@@ -52,7 +57,7 @@ def compare(name, actual, expected, *, exact=False, dtype=None, promoted=None,
         return result | {"passed": True, "policy": "quality-structural-v1",
                          "reason": "schema, suppression and finite payload valid; fidelity checked by task continuation"}
     # The promoted execution is lazy: allclose is the upstream first branch.
-    direct = torch.allclose(b, a, atol=1e-3, rtol=1e-3, equal_nan=True)
+    direct = torch.allclose(b.to(a.dtype) if mixed else b, a, atol=1e-3, rtol=1e-3, equal_nan=True)
     promoted_value = None if direct else (promoted() if callable(promoted) else promoted)
     h = None if promoted_value is None else promoted_value.detach().cpu()
     if h is not None:
@@ -65,8 +70,8 @@ def compare(name, actual, expected, *, exact=False, dtype=None, promoted=None,
         if not bool(h.isfinite().all()):
             return result | {"reason": "nonfinite logical numerical payload"}
     errors = []
-    passed = same(b, a, h, log_error=lambda fmt, *args: errors.append(fmt % args), **UPSTREAM_OPTIONS)
-    direct = torch.allclose(b, a, atol=1e-3, rtol=1e-3, equal_nan=True)
+    passed = same(b, a, h, log_error=lambda fmt, *args: errors.append(fmt % args), **(UPSTREAM_OPTIONS | {"exact_dtype": not mixed}))
+    direct = torch.allclose(b.to(a.dtype) if mixed else b, a, atol=1e-3, rtol=1e-3, equal_nan=True)
     result.update(passed=bool(passed), reason="within upstream policy" if passed else "upstream numerical comparison failed",
                   branch="allclose" if direct else "fp64-rmse" if (h if h is not None else b).dtype == torch.float64 else "allclose-failed",
                   promoted_reference=h is not None, upstream_errors=errors)
@@ -97,4 +102,5 @@ def differential_comparator(acceleration, observation):
         return compare_categorical(observation.name, observation.actual, observation.expected)
     return compare(observation.name, observation.actual, observation.expected,
                    exact=observation.exact, dtype=observation.dtype,
-                   promoted=observation.promoted, suppression_mask=observation.suppression_mask)
+                   promoted=observation.promoted, suppression_mask=observation.suppression_mask,
+                   internal=observation.internal)
