@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from mstar.engine.execution import Execution, InvocationFacts, LogicalInvocation
 from mstar.model.contract import NodeContract, TensorInput, TensorOutput
 from mstar.model.weights import LogicalWeightSource, WeightSpec
-from mstar_accelerators.backends.torch import TorchProgram, prepare_torch_programs
+from mstar_accelerators.backends.torch import TorchProgram, WorkspaceCapacity, prepare_torch_programs
 from mstar_accelerators.backends.weights import TensorShard, prepare_weights
 
 
@@ -92,3 +92,46 @@ def test_role_partitioned_weights_preserve_ffn_algebra_and_aliases():
     actual = sum(partials) + values["ff.fc2.bias"].double()
     torch.testing.assert_close(actual, expected, rtol=1e-13, atol=1e-13)
     assert not torch.allclose(actual + values["ff.fc2.bias"].double(), expected)
+
+
+def test_shared_workspace_capacity_spans_prepared_callbacks():
+    contract = NodeContract((TensorInput("x", "tensor_inputs.x", (2,)),),
+                           (TensorOutput("y", (2,)),), Result, "node.")
+    binding = SimpleNamespace(submodule=SimpleNamespace(logical_contract=lambda: contract),
+                              device=torch.device("cpu"), dtype=torch.float32,
+                              services=None, graph_walks=("prefill", "decode"))
+    capacity = WorkspaceCapacity(1)
+    first = prepare_torch_programs(binding, {},
+        {"prefill": TorchProgram(lambda call: {"y": call.inputs.x[0] + 1})},
+        workspace_capacity=capacity)
+    second = prepare_torch_programs(binding, {},
+        {"decode": TorchProgram(lambda call: {"y": call.inputs.x[0] + 2})},
+        workspace_capacity=capacity)
+    prefill, decode = InvocationFacts("prefill", 1), InvocationFacts("decode", 1)
+    lease = first.acquire(prefill)
+    assert second.acquire(decode) is None
+    with pytest.raises(RuntimeError, match="acquired"):
+        capacity.close()
+    with pytest.raises(RuntimeError, match="acquired"):
+        first.close()
+    execution = Execution(None, lease)
+    invocation = LogicalInvocation("prefill", [7],
+        [SimpleNamespace(tensor_inputs={"x": torch.tensor([1., 2.])})], None, {})
+    result = first.primitive(first.materialize(invocation, execution), execution)
+    assert torch.equal(result.y, torch.tensor([2., 3.]))
+    lease.close()
+    lease.close()  # Release is idempotent.
+    first.close()  # A borrower cannot close the physical owner's capacity.
+    lease = second.acquire(decode)
+    assert lease is not None
+    execution = Execution(None, lease)
+    invocation = LogicalInvocation("decode", [7], invocation.inputs, None, {})
+    result = second.primitive(second.materialize(invocation, execution), execution)
+    assert torch.equal(result.y, torch.tensor([3., 4.]))
+    with pytest.raises(RuntimeError, match="acquired"):
+        capacity.close()
+    lease.close()
+    capacity.close()
+    with pytest.raises(RuntimeError, match="closed"):
+        second.acquire(decode)
+    second.close()

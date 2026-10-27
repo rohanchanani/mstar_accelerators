@@ -20,30 +20,54 @@ class TorchProgram:
     slots: int = 2
 
 
-class _Pool:
-    def __init__(self, program):
-        if program.slots < 1:
-            raise ValueError("a Torch program needs at least one workspace slot")
-        self.program = program
+class WorkspaceCapacity:
+    """Physical owner capacity shared by synchronous callbacks.
+
+    Borrowing programs do not close it; its physical owner closes it before
+    destroying backing storage. Active leases make close fail without mutation.
+    """
+
+    def __init__(self, slots=1):
+        if type(slots) is not int or slots < 1:
+            raise ValueError("workspace capacity needs a positive integer slot count")
+        self.slots = slots
         self.active = 0
         self.closed = False
         self.lock = threading.Lock()
 
-    def acquire(self):
+    def close(self):
         with self.lock:
-            if self.closed:
+            if self.active:
+                raise RuntimeError("workspace capacity still has acquired workspaces")
+            self.closed = True
+
+
+class _Pool:
+    def __init__(self, program, capacity=None):
+        self.owns_capacity = capacity is None
+        self.capacity = capacity if capacity is not None else WorkspaceCapacity(program.slots)
+        self.program = program
+        self.active = 0
+        self.closed = False
+
+    def acquire(self):
+        with self.capacity.lock:
+            if self.closed or self.capacity.closed:
                 raise RuntimeError("Torch program is closed")
-            if self.active == self.program.slots:
+            if self.capacity.active == self.capacity.slots:
                 return None
+            self.capacity.active += 1
             self.active += 1
             return _Lease(self)
 
     def close(self):
-        with self.lock:
+        with self.capacity.lock:
             if self.active:
                 raise RuntimeError("Torch program still has acquired workspaces")
             self.closed = True
             self.program = None
+            if self.owns_capacity:
+                self.capacity.closed = True
 
 
 class _Lease:
@@ -52,19 +76,21 @@ class _Lease:
         self.closed = False
 
     def close(self):
-        with self.pool.lock:
+        with self.pool.capacity.lock:
             if not self.closed:
                 self.closed = True
                 self.pool.active -= 1
+                self.pool.capacity.active -= 1
 
 
 def prepare_torch_programs(binding, resources, programs: Mapping[str, TorchProgram], *,
-                           call_binding=None):
+                           call_binding=None, workspace_capacity=None):
     """Bind explicitly CPU Torch work without owning resources or RNG commits.
 
     Callbacks may execute collectives. M* must finish distributed selection and
     admission before invoking either materialization or computation. Slot close
     follows the engine's completion boundary; this helper has no retry policy.
+    An explicit workspace_capacity replaces per-program slots and is borrowed.
     """
     if binding.device.type != "cpu":
         raise ValueError("this synchronous Torch helper requires an explicit CPU binding")
@@ -74,7 +100,9 @@ def prepare_torch_programs(binding, resources, programs: Mapping[str, TorchProgr
         programs = {walk: program for walk, program in programs.items()
                     if walk in binding.graph_walks}
     defaults = call_binding or bind_default_call(binding, resources)
-    pools = {walk: _Pool(program) for walk, program in programs.items()}
+    pools = {walk: _Pool(program, workspace_capacity) for walk, program in programs.items()}
+    output_specs = tuple(defaults.contract.outputs)
+    expected = frozenset(spec.name for spec in output_specs)
 
     def acquire(facts):
         return pools[facts.graph_walk].acquire()
@@ -85,17 +113,19 @@ def prepare_torch_programs(binding, resources, programs: Mapping[str, TorchProgr
         if lease.closed:
             raise RuntimeError("Torch workspace has already been released")
         values = lease.pool.program.run(call)
-        expected = {spec.name for spec in defaults.contract.outputs}
         if set(values) != expected:
             raise ValueError(f"Torch output fields differ: expected {sorted(expected)}, got {sorted(values)}")
-        for spec in defaults.contract.outputs:
+        for spec in output_specs:
             destination = getattr(call.outputs, spec.name)
             source = values[spec.name]
             pairs = zip(destination, source, strict=True) if spec.per_request else ((destination, source),)
             for target, value in pairs:
                 if target.shape != value.shape:
                     raise ValueError(f"{spec.name}: expected {tuple(target.shape)}, got {tuple(value.shape)}")
-                target.copy_(value)
+                # Native writers may already have filled this exact owned
+                # output. Distinct aliases still take the ordinary copy path.
+                if target is not value or type(target) is not torch.Tensor:
+                    target.copy_(value)
         return defaults.result(call)
 
     def close():
