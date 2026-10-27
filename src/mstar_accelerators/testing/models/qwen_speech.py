@@ -48,7 +48,7 @@ def fixtures(model, dtype):
     values = []
     for key, prompt, text in CASES:
         ids = model.process_prompt(prompt=prompt, input_modalities=['text'],
-                                   output_modalities=['audio'])['text_inputs'][0]
+                                   output_modalities=['audio']).new_input_tensors['text_inputs'][0]
         # Same model-owned text inclusion semantics as the producer's
         # postprocess. This constructs a fixture; it runs no replacement model.
         included = shell._get_talker_text_mask(ids)

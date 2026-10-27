@@ -118,7 +118,7 @@ def audio_inputs(model, path, *, language="en", task="transcribe"):
         samples = np.frombuffer(audio.readframes(audio.getnframes()), dtype="<i2")
     waveform = torch.from_numpy(samples.astype(np.float32) / np.float32(32768.0))
     inputs = model.process_prompt(None, ["audio"], ["text"],
-                                  tensors={"audio_inputs": [waveform]}, language=language, task=task)
+                                  tensors={"audio_inputs": [waveform]}, language=language, task=task).new_input_tensors
     identity = {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
                 "samples": waveform.numel(), "sample_rate": 16000}
     return inputs, identity
