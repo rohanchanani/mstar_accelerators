@@ -71,7 +71,7 @@ model-owned computation and state effects, independently of its physical impleme
 An acceleration must satisfy its semantic contract wherever `when` holds:
 
 $$
-\left[\!\left[n\right]\!\right]_{W,C}:
+\left[\mkern-3mu\left[n\right]\mkern-3mu\right]_{W,C}:
 I_n \times S_n \to O_n \times S_n \times E_n
 $$
 
@@ -142,7 +142,7 @@ resources owned by M*. `verify` is responsible for enforcing the acceleration's
 compliance with the node's semantic contract:
 
 $$
-\left[\!\left[n\right]\!\right]_{W,C}:
+\left[\mkern-3mu\left[n\right]\mkern-3mu\right]_{W,C}:
 I_n \times S_n \to O_n \times S_n \times E_n
 $$
 
