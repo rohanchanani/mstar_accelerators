@@ -60,7 +60,8 @@ ggml_type graph_type(const std::string& type) {
   if (type == "f32") return GGML_TYPE_F32;
   if (type == "i32") return GGML_TYPE_I32;
   if (type == "i64") return GGML_TYPE_I64;
-  throw native::Rejected("graph tensor dtype must be f32, i32, or i64");
+  if (type == "q8_0") return GGML_TYPE_Q8_0;
+  throw native::Rejected("graph tensor dtype must be f32, i32, i64, or explicit q8_0 constant storage");
 }
 
 std::array<std::int64_t, 4> graph_dims(const std::vector<std::int64_t>& ne) {
@@ -79,16 +80,22 @@ class Graph {
 public:
   explicit Graph(std::size_t max_nodes = 4096) : data(std::make_shared<GraphData>(max_nodes)) {}
   std::shared_ptr<GraphData> data;
-  ggml_tensor* take(const GraphTensor& t) const {
+  ggml_tensor* take(const GraphTensor& t, bool allow_q8 = false) const {
     if (t.graph != data) throw native::Rejected("ggml tensor belongs to a different graph");
+    if (!allow_q8 && t.tensor->type == GGML_TYPE_Q8_0)
+      throw native::Rejected("Q8_0 constants are readonly operands of q8_0_dot_x4 only");
     return t.tensor;
   }
   GraphTensor wrap(ggml_tensor* t) const { return {data, t}; }
   GraphTensor tensor(const std::string& name, const std::vector<std::int64_t>& ne, const std::string& type) {
     const auto dims = graph_dims(ne);
+    const auto dtype = graph_type(type);
+    if (dtype == GGML_TYPE_Q8_0 && (dims[0] % 32 || dims[2] != 1 || dims[3] != 1 ||
+        (uint64_t(dims[0]) / 32 * uint64_t(dims[1]) * 34) % sizeof(int32_t)))
+      throw native::Rejected("Q8_0 constants require a block-aligned matrix with exact I32 byte extent");
     if (data->inputs.contains(name) || data->outputs.contains(name)) throw native::Rejected("duplicate graph binding name");
     data->room();
-    auto* t = ggml_new_tensor(data->context, graph_type(type), 4, dims.data());
+    auto* t = ggml_new_tensor(data->context, dtype, 4, dims.data());
     ggml_set_name(t, name.c_str());
     data->inputs.emplace(name, t);
     return wrap(t);
@@ -110,6 +117,34 @@ public:
     if (!ggml_prec_set_acc(t, GGML_PREC_F32) || !ggml_prec_set_src(t, GGML_PREC_F32, 1))
       throw native::Rejected("ggml cannot represent F32 matrix precision");
     return wrap(t);
+  }
+  GraphTensor quantize_q8_1_x4(const GraphTensor& a) {
+    auto* x = take(a); data->room();
+    auto* result = ggml_vk_managed_quantize_q8_1_x4(data->context, x);
+    if (!result) throw native::Rejected(ggml_vk_managed_last_error());
+    return wrap(result);
+  }
+  GraphTensor q8_0_dot_x4(const GraphTensor& weights, const GraphTensor& packed) {
+    auto* w = take(weights, true); auto* q = take(packed); data->room();
+    auto* result = ggml_vk_managed_q8_0_dot_x4(data->context, w, q);
+    if (!result) throw native::Rejected(ggml_vk_managed_last_error());
+    return wrap(result);
+  }
+  GraphTensor sdpa_decode_f32(const GraphTensor& q, const GraphTensor& k,
+                            const GraphTensor& v, const GraphTensor& mask, float scale) {
+    auto* query = take(q); auto* key = take(k); auto* value = take(v); auto* masking = take(mask);
+    data->room();
+    auto* result = ggml_vk_managed_sdpa_decode_f32(data->context, query, key, value, masking, scale);
+    if (!result) throw native::Rejected(std::string("SDPA metadata: ") + ggml_vk_managed_last_error());
+    return wrap(result);
+  }
+  GraphTensor sdpa_queries_f32(const GraphTensor& q, const GraphTensor& k,
+                            const GraphTensor& v, const GraphTensor& mask, float scale) {
+    auto* query = take(q); auto* key = take(k); auto* value = take(v); auto* masking = take(mask);
+    data->room();
+    auto* result = ggml_vk_managed_sdpa_queries_f32(data->context, query, key, value, masking, scale);
+    if (!result) throw native::Rejected(std::string("Multi-query SDPA metadata: ") + ggml_vk_managed_last_error());
+    return wrap(result);
   }
   GraphTensor scale(const GraphTensor& a, float value) {
     auto* t = take(a); data->room(); return wrap(ggml_scale(data->context, t, value));
@@ -193,7 +228,9 @@ public:
     data->room(); return wrap(ggml_categorical(data->context, l, s, o, t));
   }
   GraphTensor cast(const GraphTensor& a, const std::string& type) {
-    auto* t = take(a); const auto dt = graph_type(type); data->room(); return wrap(ggml_cast(data->context, t, dt));
+    auto* t = take(a); const auto dt = graph_type(type);
+    if (dt == GGML_TYPE_Q8_0) throw native::Rejected("Q8_0 is an explicitly packed prepared constant, not a cast");
+    data->room(); return wrap(ggml_cast(data->context, t, dt));
   }
   GraphTensor output(const std::string& name, const GraphTensor& value) {
     auto* t = take(value);
@@ -270,6 +307,12 @@ struct GraphProgram {
 };
 
 void check_tensor_shape(const at::Tensor& tensor, const ggml_tensor* spec) {
+  if (spec->type == GGML_TYPE_Q8_0) {
+    if (tensor.scalar_type() != at::kInt || !tensor.is_contiguous() || tensor.dim() != 1 ||
+        uint64_t(tensor.numel()) * sizeof(int32_t) != ggml_nbytes(spec))
+      throw native::Rejected("Q8_0 constant requires an exact flat contiguous I32 packed byte container");
+    return;
+  }
   const auto dtype = spec->type == GGML_TYPE_F32 ? at::kFloat : spec->type == GGML_TYPE_I32 ? at::kInt : at::kLong;
   if (tensor.scalar_type() != dtype || !tensor.is_contiguous() || tensor.dim() > 4)
     throw native::Rejected("graph binding requires matching contiguous dtype/rank");
@@ -399,6 +442,8 @@ public:
           const auto view=tensor_view(found->second); auto imported=program->import(*slot,view);
           bind_tensor(spec,imported,view); slot->persistent.push_back(imported); slot->uses.push_back(view);
         } else {
+          if (spec->type == GGML_TYPE_Q8_0)
+            throw native::Rejected("Q8_0 graph input must be supplied as a prepared readonly constant");
           slot->inputs.emplace(name,spec); slot->mutable_tensors.push_back(spec);
         }
       }
@@ -461,8 +506,26 @@ public:
     info["provider"]="ggml-vulkan-managed"; info["slots"]=program_->slots.size(); info["active_slots"]=busy;
     info["arena_bytes_total"]=program_->arena_bytes; info["backend_scratch_bytes_per_slot"]=0;
     info["submissions"]=program_->submissions; info["retirements"]=program_->retirements;
-    info["implicit_host_copies"]=false; info["source_precision"]="float32";
-    info["graph_nodes"]=ggml_graph_n_nodes(program_->slots.front()->graph->graph);
+    info["implicit_host_copies"]=false;
+    bool q8 = false;
+    for (const auto& [name,tensor] : program_->slots.front()->graph->inputs)
+      q8 = q8 || tensor->type == GGML_TYPE_Q8_0;
+    info["source_precision"] = q8 ? "explicit-q8_0/q8_1_x4-with-f32-output" : "float32";
+    auto* graph=program_->slots.front()->graph->graph;
+    info["graph_nodes"]=ggml_graph_n_nodes(graph);
+    std::size_t attention=0, queries_attention=0, q8_dots=0, quantizers=0;
+    for (int i=0; i<ggml_graph_n_nodes(graph); ++i) {
+      const auto* node=ggml_graph_node(graph,i);
+      attention += ggml_vk_managed_sdpa_decode_metadata(node,nullptr);
+      queries_attention += ggml_vk_managed_sdpa_queries_metadata(node,nullptr);
+      const auto kind=ggml_vk_managed_q8_operation(node);
+      q8_dots += kind == GGML_VK_MANAGED_Q8_0_DOT_X4;
+      quantizers += kind == GGML_VK_MANAGED_QUANTIZE_Q8_1_X4;
+    }
+    info["managed_sdpa_decode_nodes_per_slot"]=attention;
+    info["managed_sdpa_queries_nodes_per_slot"]=queries_attention;
+    info["managed_q8_dot_nodes_per_slot"]=q8_dots;
+    info["managed_q8_quantize_nodes_per_slot"]=quantizers;
     return info;
   }
 };
@@ -474,11 +537,57 @@ void register_graph(py::module_& module) {
     .def(py::init<std::size_t>(),py::arg("max_nodes")=4096)
     .def("tensor",&Graph::tensor,py::arg("name"),py::arg("ne"),py::arg("dtype")="f32")
     .def("mul_mat",&Graph::mul_mat)
+    .def("quantize_q8_1_x4",&Graph::quantize_q8_1_x4)
+    .def("q8_0_dot_x4",&Graph::q8_0_dot_x4)
     .def("add",[](Graph& g,const GraphTensor& a,const GraphTensor& b){return g.binary(a,b,false);})
     .def("mul",[](Graph& g,const GraphTensor& a,const GraphTensor& b){return g.binary(a,b,true);})
     .def("scale",&Graph::scale).def("norm",&Graph::norm,py::arg("a"),py::arg("eps")=1e-5f)
     .def("gelu_erf",&Graph::gelu_erf)
     .def("softmax",&Graph::softmax,py::arg("a"),py::arg("mask")=std::nullopt,py::arg("scale")=1.f)
+    .def("sdpa_decode_f32", &Graph::sdpa_decode_f32)
+    .def_static("supports_sdpa_decode_f32",[](std::int64_t heads,std::int64_t tokens,std::int64_t batch) {
+      // Metadata rejection precedes device selection. Resolve only the existing
+      // initialized Runtime's actual DRM device; query stays in preparation.
+      Graph graph;
+      const auto q=graph.tensor("q",{64,heads,1,batch},"f32");
+      const auto k=graph.tensor("k",{64,heads,tokens,batch},"f32");
+      const auto v=graph.tensor("v",{64,heads,tokens,batch},"f32");
+      const auto mask=graph.tensor("mask",{tokens,1,1,batch},"f32");
+      const auto result=graph.sdpa_decode_f32(q,k,v,mask,.125f);
+      const auto execution=current_execution();
+      const auto device=execution.runtime->device_identity();
+      GraphSlotPtr slot(new GraphSlot);
+      slot->managed=ggml_vk_managed_create(device.major,device.minor);
+      if (!slot->managed) provider_error("SDPA capability context",execution.runtime.get());
+      int supported=0;
+      check_status(ggml_vk_managed_supports_sdpa_decode_f32(slot->managed,result.tensor,&supported),
+                   "SDPA capability query",execution.runtime.get());
+      check_status(ggml_vk_managed_destroy(slot->managed),"SDPA capability close",execution.runtime.get());
+      slot->managed=nullptr;
+      return supported != 0;
+    },py::arg("heads"),py::arg("tokens"),py::arg("batch")=1)
+    .def("sdpa_queries_f32", &Graph::sdpa_queries_f32)
+    .def_static("supports_sdpa_queries_f32",[](std::int64_t heads,std::int64_t tokens,std::int64_t queries,std::int64_t batch) {
+      // Metadata rejection precedes device selection. Resolve only the existing
+      // initialized Runtime's actual DRM device; query stays in preparation.
+      Graph graph;
+      const auto q=graph.tensor("q",{64,heads,queries,batch},"f32");
+      const auto k=graph.tensor("k",{64,heads,tokens,batch},"f32");
+      const auto v=graph.tensor("v",{64,heads,tokens,batch},"f32");
+      const auto mask=graph.tensor("mask",{tokens,queries,1,batch},"f32");
+      const auto result=graph.sdpa_queries_f32(q,k,v,mask,.125f);
+      const auto execution=current_execution();
+      const auto device=execution.runtime->device_identity();
+      GraphSlotPtr slot(new GraphSlot);
+      slot->managed=ggml_vk_managed_create(device.major,device.minor);
+      if (!slot->managed) provider_error("SDPA capability context",execution.runtime.get());
+      int supported=0;
+      check_status(ggml_vk_managed_supports_sdpa_queries_f32(slot->managed,result.tensor,&supported),
+                   "SDPA capability query",execution.runtime.get());
+      check_status(ggml_vk_managed_destroy(slot->managed),"SDPA capability close",execution.runtime.get());
+      slot->managed=nullptr;
+      return supported != 0;
+    },py::arg("heads"),py::arg("tokens"),py::arg("queries"),py::arg("batch")=1)
     .def("reshape",&Graph::reshape).def("permute",&Graph::permute).def("cont",&Graph::cont)
     .def("view",&Graph::view,py::arg("a"),py::arg("ne"),py::arg("strides_bytes"),py::arg("offset")=0)
     .def("get_rows",&Graph::get_rows).def("set_rows",&Graph::set_rows)

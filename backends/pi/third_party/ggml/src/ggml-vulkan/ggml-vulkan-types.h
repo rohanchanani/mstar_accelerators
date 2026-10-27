@@ -841,6 +841,10 @@ struct vk_device_struct {
     vk_pipeline pipeline_managed_cpy_32, pipeline_managed_norm_f32, pipeline_managed_gelu_erf_f32;
     vk_pipeline pipeline_managed_get_rows_f32, pipeline_managed_set_rows_f32_i32, pipeline_managed_set_rows_f32_i64;
     vk_pipeline pipeline_managed_soft_max_f32;
+    vk_pipeline pipeline_managed_sdpa_decode_f32;
+    vk_pipeline pipeline_managed_sdpa_queries_f32;
+    vk_pipeline pipeline_managed_q8_0_block_dot_x4;
+    uint32_t max_compute_workgroup_subgroups = 0;
     vk_pipeline pipeline_cpy_32, pipeline_cpy_f32_f16, pipeline_cpy_16, pipeline_cpy_f16_f32, pipeline_cpy_f32_bf16, pipeline_cpy_bf16_f32, pipeline_cpy_bf16_f16, pipeline_cpy_f32_i32, pipeline_cpy_i32_f32;
     vk_pipeline pipeline_contig_cpy_32, pipeline_contig_cpy_f32_f16, pipeline_contig_cpy_16, pipeline_contig_cpy_f16_f32, pipeline_contig_cpy_f32_bf16, pipeline_contig_cpy_bf16_f32, pipeline_contig_cpy_bf16_f16, pipeline_contig_cpy_f32_i32, pipeline_contig_cpy_i32_f32;
     vk_pipeline pipeline_cpy_f32_quant[GGML_TYPE_COUNT];

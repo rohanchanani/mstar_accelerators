@@ -90,13 +90,14 @@ def encoder_graph(config: WhisperModelConfig, *, graph=None):
 
 
 def decoder_graph(config: WhisperModelConfig, layout: PagedLayout, *, prefill: bool,
-                  graph=None, diagnostics: bool = False, sample_tokens=None):
+                  graph=None, diagnostics: bool = False, sample_tokens=None, readout=None, attention=None):
     """A persistent Q=4 prefill or Q=1 decode template over runtime-owned KV.
 
     Maps and masks are invocation inputs derived from M*'s immutable plans.
     Fixed capacities make graph construction independent of request history.
     """
     g = graph if graph is not None else _new_graph()
+    attend = _attention if attention is None else attention
     w = _Weights(g, config)
     h, q = config.d_model, 4 if prefill else 1
     target, source = config.max_target_positions, config.max_source_positions
@@ -139,7 +140,7 @@ def decoder_graph(config: WhisperModelConfig, layout: PagedLayout, *, prefill: b
         # on the shared base allocation.  This is a real ggml graph edge.
         sk = g.get_rows(self_cache, self_read_k)
         sv = g.get_rows(self_cache, self_read_v)
-        attended = _attention(g, sq, sk, sv, heads=config.decoder_attention_heads,
+        attended = attend(g, sq, sk, sv, heads=config.decoder_attention_heads,
                               width=h, queries=q, keys=target, mask=self_mask)
         x = g.add(x, _linear(g, w, prefix + ".self_attn.out_proj", attended))
 
@@ -147,7 +148,7 @@ def decoder_graph(config: WhisperModelConfig, layout: PagedLayout, *, prefill: b
         cq = _linear(g, w, prefix + ".encoder_attn.q_proj", normalized)
         ck = g.get_rows(cross_cache, cross_read_k)
         cv = g.get_rows(cross_cache, cross_read_v)
-        attended = _attention(g, cq, ck, cv, heads=config.decoder_attention_heads,
+        attended = attend(g, cq, ck, cv, heads=config.decoder_attention_heads,
                               width=h, queries=q, keys=source, mask=cross_mask)
         x = g.add(x, _linear(g, w, prefix + ".encoder_attn.out_proj", attended))
         x = g.add(x, _ffn(g, w, prefix, _norm(g, w, prefix + ".final_layer_norm", x)))
@@ -155,7 +156,7 @@ def decoder_graph(config: WhisperModelConfig, layout: PagedLayout, *, prefill: b
     # Last actual query, never a padded row. The model owns suppression and
     # effects; the implementation chooses how to realize its admitted policy.
     last = g.view(x, (h, 1), (4, 4 * h), offset=4 * h * (q - 1))
-    logits = g.mul_mat(w("decoder.proj_out.weight"), last)
+    logits = g.mul_mat(w("decoder.proj_out.weight"), last) if readout is None else readout(g, config, last)
     logits = g.add(logits, g.tensor(f"{SAMPLER}.logit_mask", (config.vocab_size, 1)))
     if diagnostics:
         g.output("logits", logits)

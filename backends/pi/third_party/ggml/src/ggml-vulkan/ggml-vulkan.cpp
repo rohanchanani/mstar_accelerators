@@ -1,4 +1,31 @@
 #include "ggml-vulkan-common.h"
+#include "ggml-vulkan-managed.h"
+#include "managed-sdpa-decode.h"
+#include "managed-sdpa-queries.h"
+#include "managed-q8-block-dot.h"
+
+extern const uint64_t managed_sdpa_decode_f32_len;
+extern const unsigned char managed_sdpa_decode_f32_data[];
+extern const uint64_t managed_sdpa_queries_f32_len;
+extern const unsigned char managed_sdpa_queries_f32_data[];
+extern const uint64_t managed_q8_0_block_dot_x4_len;
+extern const unsigned char managed_q8_0_block_dot_x4_data[];
+
+static_assert(sizeof(vk_mat_vec_push_constants) == sizeof(managed_q8_block_dot::Parameters));
+static_assert(offsetof(vk_mat_vec_push_constants, ncols) == offsetof(managed_q8_block_dot::Parameters, ncols));
+static_assert(offsetof(vk_mat_vec_push_constants, stride_a) == offsetof(managed_q8_block_dot::Parameters, stride_a));
+static_assert(offsetof(vk_mat_vec_push_constants, stride_b) == offsetof(managed_q8_block_dot::Parameters, stride_b));
+static_assert(offsetof(vk_mat_vec_push_constants, stride_d) == offsetof(managed_q8_block_dot::Parameters, stride_d));
+static_assert(offsetof(vk_mat_vec_push_constants, batch_stride_a) == offsetof(managed_q8_block_dot::Parameters, batch_stride_a));
+static_assert(offsetof(vk_mat_vec_push_constants, batch_stride_b) == offsetof(managed_q8_block_dot::Parameters, batch_stride_b));
+static_assert(offsetof(vk_mat_vec_push_constants, batch_stride_d) == offsetof(managed_q8_block_dot::Parameters, batch_stride_d));
+static_assert(offsetof(vk_mat_vec_push_constants, fusion_flags) == offsetof(managed_q8_block_dot::Parameters, fusion_flags));
+static_assert(offsetof(vk_mat_vec_push_constants, base_work_group_y) == offsetof(managed_q8_block_dot::Parameters, base_work_group_y));
+static_assert(offsetof(vk_mat_vec_push_constants, ne02) == offsetof(managed_q8_block_dot::Parameters, ne02));
+static_assert(offsetof(vk_mat_vec_push_constants, ne12) == offsetof(managed_q8_block_dot::Parameters, ne12));
+static_assert(offsetof(vk_mat_vec_push_constants, broadcast2) == offsetof(managed_q8_block_dot::Parameters, broadcast2));
+static_assert(offsetof(vk_mat_vec_push_constants, broadcast3) == offsetof(managed_q8_block_dot::Parameters, broadcast3));
+
 
 static vk_device_architecture get_device_architecture(const vk::PhysicalDevice& device) {
     vk::PhysicalDeviceProperties props = device.getProperties();
@@ -673,11 +700,16 @@ static void ggml_vk_create_pipeline_func(vk_device& device, vk_pipeline& pipelin
 #endif
 
 #if VK_HEADER_VERSION >= 287
-    // Roll the mul_mm BK loop on Asahi Linux. Skip bf16 and the mul_mmq pipelines.
-    if (device->driver_id == vk::DriverId::eMesaHoneykrisp &&
+    // Reuse the existing loop-hint rewrite for managed full-F32 VC7 matrices.
+    // Keep the same tile, staged operands and ordered F32 FMAs; only prevent
+    // the eight inner BK steps from expanding the compiler's live ranges.
+    const bool roll_broadcom_full_f32 = device->vendor_id == 0x14e4 &&
+        device->subgroup_size == 16 && pipeline->name.rfind("matmul_full_f32", 0) == 0;
+    const bool roll_asahi = device->driver_id == vk::DriverId::eMesaHoneykrisp &&
         pipeline->name.rfind("matmul", 0) == 0 &&
         pipeline->name.find("bf16") == std::string::npos &&
-        pipeline->name.find("q8_1") == std::string::npos) {
+        pipeline->name.find("q8_1") == std::string::npos;
+    if (roll_broadcom_full_f32 || roll_asahi) {
         const uint32_t * src   = spirv.empty() ? reinterpret_cast<const uint32_t *>(spv_data) : spirv.data();
         size_t           src_n = spirv.empty() ? spv_size / sizeof(uint32_t) : spirv.size();
         std::vector<uint32_t> rolled;
@@ -1678,6 +1710,44 @@ static bool ggml_vk_fa_scalar_uses_mmq(const vk_device& device, ggml_type k_type
 #endif
 }
 
+static bool ggml_vk_q8_block_dot_device_supported(const vk_device & device) {
+#if defined(GGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT)
+    const auto & limits = device->properties.limits;
+    return device->integer_dot_product && device->subgroup_basic && device->subgroup_arithmetic &&
+        device->max_compute_workgroup_subgroups >= managed_q8_block_dot::rows &&
+        device->subgroup_size_control && device->subgroup_require_full_support &&
+        device->subgroup_min_size <= managed_q8_block_dot::subgroup &&
+        device->subgroup_max_size >= managed_q8_block_dot::subgroup &&
+        limits.maxComputeWorkGroupInvocations >= managed_q8_block_dot::workgroup &&
+        limits.maxComputeWorkGroupSize[0] >= managed_q8_block_dot::workgroup &&
+        limits.maxPushConstantsSize >= sizeof(managed_q8_block_dot::Parameters) &&
+        limits.maxPerStageDescriptorStorageBuffers >= managed_q8_block_dot::descriptors &&
+        limits.maxDescriptorSetStorageBuffers >= managed_q8_block_dot::descriptors;
+#else
+    GGML_UNUSED(device);
+    return false;
+#endif
+}
+
+static bool ggml_vk_sdpa_decode_device_supported(const vk_device & device) {
+    const auto & limits = device->properties.limits;
+    return device->subgroup_basic && device->subgroup_arithmetic &&
+        device->max_compute_workgroup_subgroups >= managed_sdpa_decode::workgroup / managed_sdpa_decode::subgroup &&
+        device->subgroup_size_control && device->subgroup_require_full_support &&
+        device->subgroup_min_size <= managed_sdpa_decode::subgroup &&
+        device->subgroup_max_size >= managed_sdpa_decode::subgroup &&
+        limits.maxComputeWorkGroupInvocations >= managed_sdpa_decode::workgroup &&
+        limits.maxComputeWorkGroupSize[0] >= managed_sdpa_decode::workgroup &&
+        limits.maxComputeSharedMemorySize >= managed_sdpa_decode::shared_bytes &&
+        limits.maxPushConstantsSize >= sizeof(managed_sdpa_decode::Parameters) &&
+        limits.maxPerStageDescriptorStorageBuffers >= 5 && limits.maxDescriptorSetStorageBuffers >= 5;
+}
+
+static bool ggml_vk_sdpa_queries_device_supported(const vk_device & device) {
+    return ggml_vk_sdpa_decode_device_supported(device) &&
+        device->properties.limits.maxPushConstantsSize >= sizeof(managed_sdpa_queries::Parameters);
+}
+
 void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
     VK_LOG_DEBUG("ggml_vk_load_shaders(" << device->name << ")");
 
@@ -2287,6 +2357,19 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
                 wt[0] <= device->properties.limits.maxComputeWorkGroupSize[0]) {
                 full_f32_tiles.push_back(tile);
             }
+        }
+        // Retain the original entries, including their large-dispatch domain.
+        // Sixteen 16-lane warps cover the same staged64x64 tile. Compared
+        // with the original128-thread tile, each lane keeps16 rather than32
+        // F32 accumulators and4 rather than8 cached A vec4 values. DATA_A_F32
+        // still fixes BK=32; neither shader math/order nor global tile reuse changes.
+        constexpr uint32_t broadcom_vendor_id = 0x14e4;
+        if (!full_f32_tiles.empty() && device->vendor_id == broadcom_vendor_id &&
+            device->subgroup_size == 16 &&
+            device->properties.limits.maxComputeSharedMemorySize >= 17408 &&
+            device->properties.limits.maxComputeWorkGroupInvocations >= 256 &&
+            device->properties.limits.maxComputeWorkGroupSize[0] >= 256) {
+            full_f32_tiles.push_back({{256, 64, 64, 32, 16, 16, 2, 2, 2, 1, 16}, {64, 64, 1}, 64});
         }
         if (!full_f32_tiles.empty()) {
             create_mm_pipelines({GGML_TYPE_F32, GGML_TYPE_F32, false, false, true}, full_f32_tiles,
@@ -3028,7 +3111,12 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
                 ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_q8_1_f32[w][GGML_TYPE_Q4_1][i], "mul_mat_vec_q4_1_q8_1_f32", arr_dmmv_q4_1_q8_1_f32_len[reduc], arr_dmmv_q4_1_q8_1_f32_data[reduc], "main", mul_mat_vec_num_bindings, sizeof(vk_mat_vec_push_constants), {rm_int_n(1*rm_stdq_int, i), 1, 1}, {wg_size_subgroup_int, rm_int_n(1*rm_stdq_int, i), i+1}, 1, true, use_subgroups, subgroup_size_int);
                 ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_q8_1_f32[w][GGML_TYPE_Q5_0][i], "mul_mat_vec_q5_0_q8_1_f32", arr_dmmv_q5_0_q8_1_f32_len[reduc], arr_dmmv_q5_0_q8_1_f32_data[reduc], "main", mul_mat_vec_num_bindings, sizeof(vk_mat_vec_push_constants), {rm_int_n(1*rm_stdq_int, i), 1, 1}, {wg_size_subgroup_int, rm_int_n(1*rm_stdq_int, i), i+1}, 1, true, use_subgroups, subgroup_size_int);
                 ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_q8_1_f32[w][GGML_TYPE_Q5_1][i], "mul_mat_vec_q5_1_q8_1_f32", arr_dmmv_q5_1_q8_1_f32_len[reduc], arr_dmmv_q5_1_q8_1_f32_data[reduc], "main", mul_mat_vec_num_bindings, sizeof(vk_mat_vec_push_constants), {rm_int_n(1*rm_stdq_int, i), 1, 1}, {wg_size_subgroup_int, rm_int_n(1*rm_stdq_int, i), i+1}, 1, true, use_subgroups, subgroup_size_int);
-                ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_q8_1_f32[w][GGML_TYPE_Q8_0][i], "mul_mat_vec_q8_0_q8_1_f32", arr_dmmv_q8_0_q8_1_f32_len[reduc], arr_dmmv_q8_0_q8_1_f32_data[reduc], "main", mul_mat_vec_num_bindings, sizeof(vk_mat_vec_push_constants), {rm_int_n(1*rm_stdq_int, i), 1, 1}, {wg_size_subgroup_int, rm_int_n(1*rm_stdq_int, i), i+1}, 1, true, use_subgroups, subgroup_size_int);
+                // Reuse packed activation loads across four Q8_0 output rows
+                // on the 16-lane Broadcom device. F32 and other Q8 types retain
+                // their original geometry; all Q8_0 columns/tails stay admitted.
+                const uint32_t q8_0_rows = device->vendor_id == 0x14e4 && device->subgroup_size == 16
+                    ? 4u : rm_int_n(1*rm_stdq_int, i);
+                ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_q8_1_f32[w][GGML_TYPE_Q8_0][i], "mul_mat_vec_q8_0_q8_1_f32", arr_dmmv_q8_0_q8_1_f32_len[reduc], arr_dmmv_q8_0_q8_1_f32_data[reduc], "main", mul_mat_vec_num_bindings, sizeof(vk_mat_vec_push_constants), {q8_0_rows, 1, 1}, {wg_size_subgroup_int, q8_0_rows, i+1}, 1, true, use_subgroups, subgroup_size_int);
 
                 ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_q8_1_f32[w][GGML_TYPE_MXFP4][i], "mul_mat_vec_mxfp4_q8_1_f32", arr_dmmv_mxfp4_q8_1_f32_len[reduc], arr_dmmv_mxfp4_q8_1_f32_data[reduc], "main", mul_mat_vec_num_bindings, sizeof(vk_mat_vec_push_constants), {rm_int_n(2*rm_stdq_int, i), 1, 1}, {wg_size_subgroup_int, rm_int_n(2*rm_stdq_int, i), i+1}, 1, true, use_subgroups, subgroup_size_int);
 
@@ -3310,6 +3398,26 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
     ggml_vk_create_pipeline(device, device->pipeline_cpy_i32_i64, "cpy_i32_i64", cpy_i32_i64_len, cpy_i32_i64_data, "main", 2, sizeof(vk_op_unary_push_constants), {256, 1, 1}, {}, 1);
     ggml_vk_create_pipeline(device, device->pipeline_cpy_i64_i32, "cpy_i64_i32", cpy_i64_i32_len, cpy_i64_i32_data, "main", 2, sizeof(vk_op_unary_push_constants), {256, 1, 1}, {}, 1);
     ggml_vk_create_pipeline(device, device->pipeline_cpy_i64, "cpy_i64", cpy_i64_len, cpy_i64_data, "main", 2, sizeof(vk_op_unary_push_constants), {256, 1, 1}, {}, 1);
+#if defined(GGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT)
+    if (ggml_vk_q8_block_dot_device_supported(device)) {
+        ggml_vk_create_pipeline(device, device->pipeline_managed_q8_0_block_dot_x4,
+            "managed_q8_0_block_dot_x4", managed_q8_0_block_dot_x4_len, managed_q8_0_block_dot_x4_data,
+            "main", managed_q8_block_dot::descriptors, sizeof(vk_mat_vec_push_constants),
+            {managed_q8_block_dot::rows, 1, 1}, {}, 1, false, true, managed_q8_block_dot::subgroup);
+    }
+#endif
+    if (ggml_vk_sdpa_decode_device_supported(device)) {
+        ggml_vk_create_pipeline(device, device->pipeline_managed_sdpa_decode_f32,
+            "managed_sdpa_decode_f32", managed_sdpa_decode_f32_len, managed_sdpa_decode_f32_data,
+            "main", 5, sizeof(managed_sdpa_decode::Parameters), {1, 1, 1}, {}, 1,
+            false, true, managed_sdpa_decode::subgroup);
+    }
+    if (ggml_vk_sdpa_queries_device_supported(device)) {
+        ggml_vk_create_pipeline(device, device->pipeline_managed_sdpa_queries_f32,
+            "managed_sdpa_queries_f32", managed_sdpa_queries_f32_len, managed_sdpa_queries_f32_data,
+            "main", 5, sizeof(managed_sdpa_queries::Parameters), {1, 1, 1}, {}, 1,
+            false, true, managed_sdpa_queries::subgroup);
+    }
     ggml_vk_create_pipeline(device, device->pipeline_managed_cpy_32, "managed_cpy_32", managed_cpy_32_len, managed_cpy_32_data, "main", 2, sizeof(vk_op_unary_push_constants), {256, 1, 1}, {}, 1);
     ggml_vk_create_pipeline(device, device->pipeline_managed_norm_f32, "managed_norm_f32", managed_norm_f32_len, managed_norm_f32_data, "main", 2, sizeof(vk_op_unary_push_constants), {1, 1, 1}, {}, 1);
     ggml_vk_create_pipeline(device, device->pipeline_managed_gelu_erf_f32, "managed_gelu_erf_f32", managed_gelu_erf_f32_len, managed_gelu_erf_f32_data, "main", 2, sizeof(vk_op_unary_push_constants), {256, 1, 1}, {}, 1);
@@ -4599,6 +4707,7 @@ vk_device ggml_vk_get_device(size_t idx) {
         if (device->subgroup_size_control) {
             device->subgroup_min_size = subgroup_size_control_props.minSubgroupSize;
             device->subgroup_max_size = subgroup_size_control_props.maxSubgroupSize;
+            device->max_compute_workgroup_subgroups = subgroup_size_control_props.maxComputeWorkgroupSubgroups;
             device_extensions.push_back("VK_EXT_subgroup_size_control");
         }
 
@@ -6125,18 +6234,71 @@ static const std::vector<vk_matmul_pipeline_pair>* ggml_vk_get_mul_mat_mat_pipel
     return &it->second;
 }
 
+static uint32_t ggml_vk_matmul_pipeline_index(ggml_backend_vk_context * ctx,
+        const std::vector<vk_matmul_pipeline_pair>& configs,
+        uint32_t m, uint32_t n, bool mul_mat_id) {
+    auto& selector = mul_mat_id ? ctx->device->matmul_id_tile_selector : ctx->device->matmul_tile_selector;
+    uint32_t idx = selector(m, n, 0, ctx->device->shader_core_count, configs);
+    constexpr uint32_t broadcom_vendor_id = 0x14e4;
+    if (ctx->managed_external && !mul_mat_id && ctx->device->vendor_id == broadcom_vendor_id &&
+        ctx->device->subgroup_size == 16 && configs.size() > 1) {
+        const auto full_f32 = ctx->device->pipeline_matmul.find(
+            {GGML_TYPE_F32, GGML_TYPE_F32, false, false, true});
+        if (full_f32 != ctx->device->pipeline_matmul.end() && &full_f32->second == &configs) {
+            const uint32_t candidate = uint32_t(configs.size() - 1);
+            const auto & tile = configs[candidate].unaligned;
+            if (m > 32 && n > 32 &&
+                (uint64_t(m) + tile->wg_denoms[0] - 1) / tile->wg_denoms[0] <=
+                    ctx->device->properties.limits.maxComputeWorkGroupCount[0]) {
+                return candidate;
+            }
+            // Appending a candidate can make the generic selector return its
+            // new last index. Clamping restores the original generic choice.
+            idx = std::min(idx, candidate - 1);
+        }
+    }
+    if (idx >= configs.size()) idx = (uint32_t)configs.size() - 1;
+    return idx;
+}
+
 static vk_pipeline ggml_vk_guess_matmul_pipeline_map(ggml_backend_vk_context * ctx,
         const std::vector<vk_matmul_pipeline_pair>& configs,
         uint32_t m, uint32_t n, bool aligned, bool mul_mat_id) {
-    auto& selector = mul_mat_id ? ctx->device->matmul_id_tile_selector : ctx->device->matmul_tile_selector;
-    uint32_t idx = selector(m, n, 0, ctx->device->shader_core_count, configs);
-    if (idx >= configs.size()) idx = (uint32_t)configs.size() - 1;
+    const uint32_t idx = ggml_vk_matmul_pipeline_index(ctx, configs, m, n, mul_mat_id);
     return (aligned && configs[idx].aligned) ? configs[idx].aligned : configs[idx].unaligned;
+}
+
+static bool ggml_vk_managed_use_mat_vec(const ggml_tensor * node) {
+    // The resident vector shader has NUM_COLS specializations for 1..8.
+    // For multiple columns its batch_stride_b/d encode column strides, so
+    // outer batches must remain on the ordinary matrix path. N=1 retains
+    // the existing batched/broadcast vector domain.
+    // Amortize multi-column accumulators only on aligned, substantial rows.
+    // Other shapes retain resident matrix tiles; N=1 keeps its prior domain.
+    return node->ne[1] == 1 || (node->ne[1] >= 2 && node->ne[1] <= 4 &&
+            node->ne[0] >= 128 && node->src[0]->ne[0] >= 256 &&
+            node->src[0]->ne[0] % 32 == 0 &&
+            node->src[1]->ne[2] == 1 && node->src[1]->ne[3] == 1);
 }
 
 static void ggml_vk_managed_prepare_matrix_pipeline(ggml_backend_vk_context * ctx, const ggml_tensor * node) {
     if (ctx->device->coopmat_support || ctx->device->coopmat2) {
         throw std::runtime_error("managed full-F32 program currently admits the ordinary scalar matrix path only");
+    }
+    if (ggml_vk_managed_use_mat_vec(node)) {
+        auto pipeline = ggml_vk_get_dequantize_mul_mat_vec(ctx, GGML_TYPE_F32, GGML_TYPE_F32,
+                uint32_t(node->ne[1]), uint32_t(node->ne[0]), uint32_t(node->src[0]->ne[0]));
+        const auto & limits = ctx->device->properties.limits;
+        const uint64_t m = uint64_t(node->ne[0]);
+        const uint64_t groups_z = m > limits.maxComputeWorkGroupCount[0] ? 64 : 1;
+        if (!pipeline || (m + groups_z - 1) / groups_z > limits.maxComputeWorkGroupCount[0] ||
+            groups_z > limits.maxComputeWorkGroupCount[2]) {
+            throw std::runtime_error("managed F32 vector shape exceeds the selected pipeline dispatch domain");
+        }
+        // The exact same F32 pipeline selector is used during recording. This
+        // path reads canonical operands directly and allocates no scratch.
+        ggml_vk_load_shaders(ctx->device, pipeline);
+        return;
     }
     const auto * map = ggml_vk_get_mul_mat_mat_pipeline_map(ctx, GGML_TYPE_F32, GGML_TYPE_F32, GGML_PREC_F32);
     if (!map) {
@@ -6145,8 +6307,7 @@ static void ggml_vk_managed_prepare_matrix_pipeline(ggml_backend_vk_context * ct
     const auto m = uint32_t(node->ne[0]);
     const auto n = uint32_t(node->ne[1]);
     const auto k = uint32_t(node->src[0]->ne[0]);
-    uint32_t index = ctx->device->matmul_tile_selector(m, n, 0, ctx->device->shader_core_count, *map);
-    index = std::min(index, uint32_t(map->size() - 1));
+    const uint32_t index = ggml_vk_matmul_pipeline_index(ctx, *map, m, n, false);
     const auto & pair = (*map)[index];
     if (!pair.align) throw std::runtime_error("invalid managed matrix pipeline alignment");
     const bool aligned = (k % pair.align) == 0 && m > 8 && n > 8;
@@ -6163,9 +6324,7 @@ static void ggml_vk_managed_prepare_matrix_pipeline(ggml_backend_vk_context * ct
 static uint32_t ggml_vk_guess_matmul_pipeline_align_map(ggml_backend_vk_context * ctx,
         const std::vector<vk_matmul_pipeline_pair>& configs,
         uint32_t m, uint32_t n, bool mul_mat_id) {
-    auto& selector = mul_mat_id ? ctx->device->matmul_id_tile_selector : ctx->device->matmul_tile_selector;
-    uint32_t idx = selector(m, n, 0, ctx->device->shader_core_count, configs);
-    if (idx >= configs.size()) idx = (uint32_t)configs.size() - 1;
+    const uint32_t idx = ggml_vk_matmul_pipeline_index(ctx, configs, m, n, mul_mat_id);
     return configs[idx].align;
 }
 
@@ -6427,6 +6586,87 @@ void ggml_vk_quantize_q8_1(ggml_backend_vk_context * ctx, vk_context& subctx, co
 
     ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, { in, out }, pc, { elements, 1, 1 });
     ggml_vk_sync_buffers(ctx, subctx);
+}
+
+static vk_mat_vec_push_constants ggml_vk_managed_q8_push_constants(const ggml_tensor * node) {
+    const uint32_t k = uint32_t(node->src[0]->ne[0]);
+    const uint32_t m = uint32_t(node->ne[0]);
+    return {k, k, k, m, 0, k, m, 0, 0, 1, 1, 1, 1};
+}
+
+static bool ggml_vk_managed_use_q8_block_dot(ggml_backend_vk_context * ctx, const ggml_tensor * node) {
+    if (!ggml_vk_q8_block_dot_device_supported(ctx->device) ||
+        !managed_q8_block_dot::physical_shape(uint64_t(node->src[0]->ne[0]),
+                                             uint64_t(node->ne[0]), uint64_t(node->ne[1]))) {
+        return false;
+    }
+    const auto pc = ggml_vk_managed_q8_push_constants(node);
+    managed_q8_block_dot::Parameters checked;
+    memcpy(&checked, &pc, sizeof(checked));
+    return managed_q8_block_dot::parameters(checked);
+}
+
+static vk_pipeline ggml_vk_managed_q8_pipeline(ggml_backend_vk_context * ctx, const ggml_tensor * node) {
+    if (!ctx->managed_external || !ggml_vk_managed_q8_metadata_supported(node)) {
+        throw std::runtime_error("invalid explicit managed Q8 operation metadata");
+    }
+    const auto & limits = ctx->device->properties.limits;
+    if (ggml_vk_managed_q8_operation(node) == GGML_VK_MANAGED_QUANTIZE_Q8_1_X4) {
+        const uint32_t group = ctx->device->subgroup_size;
+        const bool clustered = ctx->device->subgroup_clustered && ctx->device->subgroup_require_full_support;
+        const uint64_t ne = uint64_t(ggml_nelements(node->src[0]));
+        // The shared reduction has whole-workgroup barriers after the x4 tail
+        // guard. A partial final workgroup must not split that guard's branch.
+        if (group < 8 || group % 8 || group > limits.maxComputeWorkGroupInvocations ||
+            group > limits.maxComputeWorkGroupSize[0] ||
+            (!clustered && group > 32 && (((ne + 127) / 128) * 128) % (group * 4))) {
+            throw std::runtime_error("Q8_1_x4 quantizer workgroup/tail exceeds the existing shader domain");
+        }
+        auto pipeline = ggml_vk_get_quantize_pipeline(ctx, GGML_TYPE_Q8_1);
+        if (!pipeline) throw std::runtime_error("explicit Q8_1_x4 quantizer pipeline unavailable");
+        return pipeline;
+    }
+    if (!ctx->device->integer_dot_product) {
+        throw std::runtime_error("explicit Q8 dot requires shader integer dot-product support");
+    }
+    const auto * weights = node->src[0];
+    const uint32_t m = uint32_t(weights->ne[1]);
+    const uint32_t n = uint32_t(node->ne[1]);
+    vk_pipeline pipeline;
+    if (ggml_vk_managed_use_q8_block_dot(ctx, node)) {
+        pipeline = ctx->device->pipeline_managed_q8_0_block_dot_x4;
+        if (!pipeline) throw std::runtime_error("resident managed Q8 block-dot pipeline unavailable");
+    } else {
+        pipeline = ggml_vk_get_dequantize_mul_mat_vec(ctx, GGML_TYPE_Q8_0, GGML_TYPE_Q8_1,
+                                                    n, m, uint32_t(weights->ne[0]));
+    }
+    const uint64_t groups_z = m > limits.maxComputeWorkGroupCount[0] ? 64 : 1;
+    const uint64_t raw_groups_x = (uint64_t(m) + groups_z - 1) / groups_z;
+    if (!pipeline || !pipeline->wg_denoms[0] ||
+        (raw_groups_x + pipeline->wg_denoms[0] - 1) / pipeline->wg_denoms[0] > limits.maxComputeWorkGroupCount[0] ||
+        groups_z > limits.maxComputeWorkGroupCount[2]) {
+        throw std::runtime_error("explicit Q8 dot shape exceeds the selected resident pipeline domain");
+    }
+    return pipeline;
+}
+
+static void ggml_vk_managed_q8_record(ggml_backend_vk_context * ctx, vk_context & subctx, const ggml_tensor * node) {
+    auto pipeline = ggml_vk_managed_q8_pipeline(ctx, node);
+    const auto a = ggml_vk_tensor_subbuffer(ctx, node->src[0]);
+    const auto d = ggml_vk_tensor_subbuffer(ctx, node);
+    if (ggml_vk_managed_q8_operation(node) == GGML_VK_MANAGED_QUANTIZE_Q8_1_X4) {
+        ggml_pipeline_request_descriptor_sets(ctx, pipeline, 1);
+        ggml_vk_quantize_q8_1(ctx, subctx, a, d, uint32_t(ggml_nelements(node->src[0])));
+        return;
+    }
+    const auto b = ggml_vk_tensor_subbuffer(ctx, node->src[1]);
+    const uint32_t m = uint32_t(node->ne[0]);
+    const uint32_t max_groups_x = ctx->device->properties.limits.maxComputeWorkGroupCount[0];
+    const uint32_t groups_z = m > max_groups_x ? 64 : 1;
+    const uint32_t groups_x = uint32_t((uint64_t(m) + groups_z - 1) / groups_z);
+    const auto pc = ggml_vk_managed_q8_push_constants(node);
+    ggml_pipeline_request_descriptor_sets(ctx, pipeline, 1);
+    ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, {a, b, d, d, d}, pc, {groups_x, 1, groups_z});
 }
 
 static vk_pipeline ggml_vk_get_64b_indexing_pipeline(ggml_backend_vk_context * ctx, vk_pipeline &pipeline) {
@@ -6862,7 +7102,7 @@ static void ggml_vk_mul_mat_vec_q_f16(ggml_backend_vk_context * ctx, vk_context&
 
     const ggml_type y_kernel_type = widen_bf16 ? GGML_TYPE_F32 : src1->type;
     const bool f16_f32_kernel = y_kernel_type == GGML_TYPE_F32;
-    bool quantize_y = ctx->device->integer_dot_product && src1->type == GGML_TYPE_F32 && ggml_is_contiguous(src1) && !y_non_contig && (ne11 * ne10) % 4 == 0 && ggml_vk_should_use_mmvq(ctx->device, ne01, ne11, ne10, src0->type);
+    bool quantize_y = !ctx->managed_external && ctx->device->integer_dot_product && src1->type == GGML_TYPE_F32 && ggml_is_contiguous(src1) && !y_non_contig && (ne11 * ne10) % 4 == 0 && ggml_vk_should_use_mmvq(ctx->device, ne01, ne11, ne10, src0->type);
 
     vk_pipeline to_fp16_vk_0 = nullptr;
     vk_pipeline to_fp16_vk_1 = nullptr;
@@ -6895,6 +7135,12 @@ static void ggml_vk_mul_mat_vec_q_f16(ggml_backend_vk_context * ctx, vk_context&
 
     const bool qx_needs_dequant = x_non_contig;
     const bool qy_needs_dequant = !quantize_y && ((src1->type != GGML_TYPE_F16 && !f16_f32_kernel) || y_non_contig);
+
+    if (ctx->managed_external && (src0->type != GGML_TYPE_F32 || src1->type != GGML_TYPE_F32 ||
+            dst->type != GGML_TYPE_F32 || !ggml_vk_managed_use_mat_vec(dst) ||
+            qx_needs_dequant || qy_needs_dequant || quantize_y)) {
+        throw std::runtime_error("managed F32 vector program attempted an unsupported conversion or layout");
+    }
 
     // Not implemented
     GGML_ASSERT(y_non_contig || !qy_needs_dequant);  // NOLINT
@@ -7418,9 +7664,13 @@ void ggml_vk_dsv4_hc_post(ggml_backend_vk_context * ctx, vk_context& subctx, con
 void ggml_vk_mul_mat(ggml_backend_vk_context * ctx, vk_context& subctx, const struct ggml_cgraph * cgraph, int node_idx) {
     if (ctx->managed_external) {
         const auto * dst = cgraph->nodes[node_idx];
-        // Initial managed policy: use the ordinary F32 matrix shader for both
-        // N=1 and N>1. No conversion or split-K scratch is admitted.
-        ggml_vk_mul_mat_q_f16(ctx, subctx, dst->src[0], dst->src[1], cgraph->nodes[node_idx], true);
+        // Both paths preserve F32 operands/accumulation and use only canonical
+        // graph storage. The selected vector shader needs no conversion or split-K.
+        if (ggml_vk_managed_use_mat_vec(dst)) {
+            ggml_vk_mul_mat_vec_q_f16(ctx, subctx, cgraph, node_idx);
+        } else {
+            ggml_vk_mul_mat_q_f16(ctx, subctx, dst->src[0], dst->src[1], cgraph->nodes[node_idx], true);
+        }
         return;
     }
     ggml_tensor * dst = cgraph->nodes[node_idx];
@@ -9596,6 +9846,114 @@ static bool ggml_vk_categorical_supported(const ggml_tensor * node) {
     return true;
 }
 
+namespace {
+struct managed_sdpa_capability_unavailable : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
+}
+
+static vk_pipeline ggml_vk_managed_sdpa_decode_pipeline(ggml_backend_vk_context * ctx,
+        const ggml_tensor * node, managed_sdpa_decode::Parameters & pc) {
+    float scale = 0.0f;
+    if (!ctx || !ctx->managed_external || !ggml_vk_managed_sdpa_decode_metadata(node, &scale) ||
+        !managed_sdpa_decode::metadata(node->src[0], node->src[1], node->src[2], node->src[3], node, scale, pc)) {
+        throw std::runtime_error("invalid explicit managed SDPA metadata/context");
+    }
+    if (!ggml_vk_sdpa_decode_device_supported(ctx->device)) {
+        throw managed_sdpa_capability_unavailable("required SDPA device capabilities unavailable");
+    }
+    const auto & limits = ctx->device->properties.limits;
+    if (pc.heads > limits.maxComputeWorkGroupCount[0] || pc.batches > limits.maxComputeWorkGroupCount[1] ||
+        limits.maxComputeWorkGroupCount[2] < 1) {
+        throw managed_sdpa_capability_unavailable("SDPA dispatch exceeds device domain");
+    }
+    // Generic managed graph validation applies these same exact range limits;
+    // include them in the preparation-only geometry capability predicate too.
+    if (ggml_nbytes(node) > limits.maxStorageBufferRange) {
+        throw managed_sdpa_capability_unavailable("SDPA output exceeds device storage-buffer range");
+    }
+    for (const auto * source : node->src) if (source && ggml_nbytes(source) > limits.maxStorageBufferRange) {
+        throw managed_sdpa_capability_unavailable("SDPA input exceeds device storage-buffer range");
+    }
+    auto pipeline = ctx->device->pipeline_managed_sdpa_decode_f32;
+    if (!pipeline) throw managed_sdpa_capability_unavailable("resident SDPA pipeline unavailable");
+    return pipeline;
+}
+
+bool ggml_vk_managed_sdpa_decode_capable(ggml_backend_vk_context * ctx, const ggml_tensor * node) {
+    try {
+        managed_sdpa_decode::Parameters pc{};
+        (void)ggml_vk_managed_sdpa_decode_pipeline(ctx, node, pc);
+        return true;
+    } catch (const managed_sdpa_capability_unavailable &) {
+        return false;
+    }
+}
+
+static void ggml_vk_managed_sdpa_decode_record(ggml_backend_vk_context * ctx, vk_context & subctx,
+        const ggml_tensor * node) {
+    managed_sdpa_decode::Parameters pc{};
+    auto pipeline = ggml_vk_managed_sdpa_decode_pipeline(ctx, node, pc);
+    const auto q = ggml_vk_tensor_subbuffer(ctx, node->src[0]);
+    const auto k = ggml_vk_tensor_subbuffer(ctx, node->src[1]);
+    const auto v = ggml_vk_tensor_subbuffer(ctx, node->src[2]);
+    const auto mask = ggml_vk_tensor_subbuffer(ctx, node->src[3]);
+    const auto out = ggml_vk_tensor_subbuffer(ctx, node);
+    ggml_pipeline_request_descriptor_sets(ctx, pipeline, 1);
+    ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, {q, k, v, mask, out}, pc, {pc.heads, pc.batches, 1});
+}
+
+static vk_pipeline ggml_vk_managed_sdpa_queries_pipeline(ggml_backend_vk_context * ctx,
+        const ggml_tensor * node, managed_sdpa_queries::Parameters & pc) {
+    float scale = 0.0f;
+    if (!ctx || !ctx->managed_external || !ggml_vk_managed_sdpa_queries_metadata(node, &scale) ||
+        !managed_sdpa_queries::metadata(node->src[0], node->src[1], node->src[2], node->src[3], node, scale, pc)) {
+        throw std::runtime_error("invalid explicit managed SDPA metadata/context");
+    }
+    if (!ggml_vk_sdpa_queries_device_supported(ctx->device)) {
+        throw managed_sdpa_capability_unavailable("required SDPA device capabilities unavailable");
+    }
+    const auto & limits = ctx->device->properties.limits;
+    if (pc.heads > limits.maxComputeWorkGroupCount[0] || pc.batches > limits.maxComputeWorkGroupCount[1] ||
+        pc.queries > limits.maxComputeWorkGroupCount[2]) {
+        throw managed_sdpa_capability_unavailable("SDPA dispatch exceeds device domain");
+    }
+    // Generic managed graph validation applies these same exact range limits;
+    // include them in the preparation-only geometry capability predicate too.
+    if (ggml_nbytes(node) > limits.maxStorageBufferRange) {
+        throw managed_sdpa_capability_unavailable("SDPA output exceeds device storage-buffer range");
+    }
+    for (const auto * source : node->src) if (source && ggml_nbytes(source) > limits.maxStorageBufferRange) {
+        throw managed_sdpa_capability_unavailable("SDPA input exceeds device storage-buffer range");
+    }
+    auto pipeline = ctx->device->pipeline_managed_sdpa_queries_f32;
+    if (!pipeline) throw managed_sdpa_capability_unavailable("resident SDPA pipeline unavailable");
+    return pipeline;
+}
+
+bool ggml_vk_managed_sdpa_queries_capable(ggml_backend_vk_context * ctx, const ggml_tensor * node) {
+    try {
+        managed_sdpa_queries::Parameters pc{};
+        (void)ggml_vk_managed_sdpa_queries_pipeline(ctx, node, pc);
+        return true;
+    } catch (const managed_sdpa_capability_unavailable &) {
+        return false;
+    }
+}
+
+static void ggml_vk_managed_sdpa_queries_record(ggml_backend_vk_context * ctx, vk_context & subctx,
+        const ggml_tensor * node) {
+    managed_sdpa_queries::Parameters pc{};
+    auto pipeline = ggml_vk_managed_sdpa_queries_pipeline(ctx, node, pc);
+    const auto q = ggml_vk_tensor_subbuffer(ctx, node->src[0]);
+    const auto k = ggml_vk_tensor_subbuffer(ctx, node->src[1]);
+    const auto v = ggml_vk_tensor_subbuffer(ctx, node->src[2]);
+    const auto mask = ggml_vk_tensor_subbuffer(ctx, node->src[3]);
+    const auto out = ggml_vk_tensor_subbuffer(ctx, node);
+    ggml_pipeline_request_descriptor_sets(ctx, pipeline, 1);
+    ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, {q, k, v, mask, out}, pc, {pc.heads, pc.batches, pc.queries});
+}
+
 // This is the managed provider's supported operator surface. It is deliberately
 // shape-only: preparation neither allocates device memory nor executes a graph.
 // Graph intermediates are supplied by the consumer's canonical arena. These
@@ -9605,13 +9963,29 @@ void ggml_vk_managed_prepare_pipeline(ggml_backend_vk_context * ctx, const ggml_
     ctx->num_additional_fused_ops = 0;
     ctx->do_add_rms_partials = false;
     if (node->op == GGML_OP_MUL_MAT || node->op == GGML_OP_ARGMAX || node->op == GGML_OP_CATEGORICAL ||
-        node->op == GGML_OP_SOFT_MAX || node->op == GGML_OP_IM2COL) {
+        node->op == GGML_OP_SOFT_MAX || node->op == GGML_OP_IM2COL || node->op == GGML_OP_CUSTOM) {
         const auto alignment = ctx->device->properties.limits.minStorageBufferOffsetAlignment;
         if (node->view_offs % alignment) throw std::runtime_error("managed kernel output view needs an aligned materialization");
         for (const auto * src : node->src) if (src && src->view_offs % alignment)
             throw std::runtime_error("managed kernel input view needs an aligned materialization");
     }
     switch (node->op) {
+    case GGML_OP_CUSTOM: {
+        vk_pipeline pipeline;
+        if (ggml_vk_managed_q8_operation(node) != GGML_VK_MANAGED_Q8_NONE) {
+            pipeline = ggml_vk_managed_q8_pipeline(ctx, node);
+        } else if (ggml_vk_managed_sdpa_decode_metadata(node, nullptr)) {
+            managed_sdpa_decode::Parameters pc{};
+            pipeline = ggml_vk_managed_sdpa_decode_pipeline(ctx, node, pc);
+        } else if (ggml_vk_managed_sdpa_queries_metadata(node, nullptr)) {
+            managed_sdpa_queries::Parameters pc{};
+            pipeline = ggml_vk_managed_sdpa_queries_pipeline(ctx, node, pc);
+        } else {
+            throw std::runtime_error("unknown managed CUSTOM identity during preparation");
+        }
+        ggml_vk_load_shaders(ctx->device, pipeline);
+        return;
+    }
     case GGML_OP_NONE: case GGML_OP_RESHAPE: case GGML_OP_VIEW:
     case GGML_OP_PERMUTE: case GGML_OP_TRANSPOSE:
         return;
@@ -12659,6 +13033,17 @@ bool ggml_vk_build_graph(ggml_backend_vk_context * ctx, ggml_cgraph * cgraph, in
     ggml_vk_debug_label dbg(compute_ctx, cgraph, node_idx, ctx->num_additional_fused_ops);
 
     switch (node->op) {
+    case GGML_OP_CUSTOM:
+        if (ggml_vk_managed_q8_operation(node) != GGML_VK_MANAGED_Q8_NONE) {
+            ggml_vk_managed_q8_record(ctx, compute_ctx, node);
+        } else if (ggml_vk_managed_sdpa_decode_metadata(node, nullptr)) {
+            ggml_vk_managed_sdpa_decode_record(ctx, compute_ctx, node);
+        } else if (ggml_vk_managed_sdpa_queries_metadata(node, nullptr)) {
+            ggml_vk_managed_sdpa_queries_record(ctx, compute_ctx, node);
+        } else {
+            throw std::runtime_error("unknown managed CUSTOM identity during recording");
+        }
+        break;
     case GGML_OP_REPEAT:
         ggml_vk_repeat(ctx, compute_ctx, src0, node);
 
@@ -15723,6 +16108,11 @@ static bool ggml_backend_vk_device_supports_op(ggml_backend_dev_t dev, const ggm
     }
 
     switch (op->op) {
+        case GGML_OP_CUSTOM:
+            return (ggml_vk_managed_q8_metadata_supported(op) &&
+                    (ggml_vk_managed_q8_operation(op) != GGML_VK_MANAGED_Q8_0_DOT_X4 || device->integer_dot_product)) ||
+                   (ggml_vk_managed_sdpa_decode_metadata(op, nullptr) && ggml_vk_sdpa_decode_device_supported(device)) ||
+                   (ggml_vk_managed_sdpa_queries_metadata(op, nullptr) && ggml_vk_sdpa_queries_device_supported(device));
         case GGML_OP_UNARY:
             switch (ggml_get_unary_op(op)) {
                 case GGML_UNARY_OP_EXP:

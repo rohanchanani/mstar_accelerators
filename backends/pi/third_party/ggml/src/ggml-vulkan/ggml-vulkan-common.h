@@ -73,6 +73,8 @@ void ggml_vk_submit(vk_context& ctx, vk::Fence fence);
 bool ggml_vk_managed_record_submission(vk_context& ctx, vk::Fence fence);
 bool ggml_vk_managed_is_recording(const ggml_backend_vk_context * ctx);
 void ggml_vk_managed_prepare_pipeline(ggml_backend_vk_context * ctx, const ggml_tensor * node);
+bool ggml_vk_managed_sdpa_decode_capable(ggml_backend_vk_context * ctx, const ggml_tensor * node);
+bool ggml_vk_managed_sdpa_queries_capable(ggml_backend_vk_context * ctx, const ggml_tensor * node);
 void ggml_vk_graph_cleanup(ggml_backend_vk_context * ctx);
 uint32_t ggml_vk_find_queue_family_index(std::vector<vk::QueueFamilyProperties>& queue_family_props, const vk::QueueFlags& required, const vk::QueueFlags& avoid, int32_t compute_index, uint32_t min_num_queues);
 std::unique_ptr<vk_queue> ggml_vk_create_queue(vk_device& device, uint32_t queue_family_index, uint32_t queue_index, vk::PipelineStageFlags&& stage_flags, bool transfer_only);

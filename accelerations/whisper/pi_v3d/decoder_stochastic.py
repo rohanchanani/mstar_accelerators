@@ -15,12 +15,15 @@ from mstar.model.whisper.submodules import WhisperDecoderSubmodule
 from mstar_accelerators import Acceleration, AllRows, Eq, Implementation, Or, Range, When
 from mstar_accelerators.compiler import bind_default_call
 from mstar_accelerators.backends.graph import (
-    GraphProgram, NativeGraphProvider, PagedLayout, categorical_tokens,
+    GraphProgram, PagedLayout, categorical_tokens,
     dense_graph_bindings, dense_views, graph_bindings, paged_views,
     prepare_graph_programs,
 )
 from mstar_accelerators.implementations.whisper.pi_v3d.graph import decoder_graph
 from mstar_accelerators.implementations.whisper.pi_v3d.dense import dense_decoder_graph
+from mstar_accelerators.implementations.whisper.pi_v3d.sdpa import decode_attention
+from mstar_accelerators.implementations.whisper.pi_v3d.sdpa_queries import prefill_attention
+from mstar_accelerators.implementations.whisper.pi_v3d.q8 import Q8ReadoutProvider, q8_readout
 from typing import Literal
 import torch
 
@@ -68,6 +71,10 @@ def resource_requests(binding):
 def prepare(binding, resources):
     defaults = bind_default_call(binding, resources, input_type=Inputs, call_type=Call, plan_type=Plans)
     config = binding.submodule.config
+    attention = (decode_attention(config) if binding.graph_walks is None or
+                 "decode" in binding.graph_walks else None)
+    attention_prefill = (prefill_attention(config) if binding.graph_walks is None or
+                        "prefill" in binding.graph_walks else None)
     layout = PagedLayout.from_resources(binding, resources)
     adapters = {
         "prefill": partial(graph_bindings, views=paged_views(binding, resources), sampling=True),
@@ -81,11 +88,11 @@ def prepare(binding, resources):
         binding, resources,
         {
             "prefill": GraphProgram(partial(decoder_graph, config, layout, prefill=True,
-                                            sample_tokens=categorical_tokens), slots=2),
+                                            sample_tokens=categorical_tokens, readout=q8_readout, attention=attention_prefill), slots=2),
             "decode": GraphProgram(partial(dense_decoder_graph, config,
-                                           sample_tokens=categorical_tokens), slots=2),
+                                           sample_tokens=categorical_tokens, readout=q8_readout, attention=attention), slots=2),
         },
-        provider=NativeGraphProvider(), call_binding=defaults, input_bindings=bind_inputs,
+        provider=Q8ReadoutProvider(binding), call_binding=defaults, input_bindings=bind_inputs,
     )
 
 acceleration = Acceleration(

@@ -1115,6 +1115,11 @@ void process_shaders() {
 
     string_to_spv("argmax_f32", "argmax.comp", merge_maps(base_dict, {{"A_TYPE", "float"}, {"D_TYPE", "int"}}));
     string_to_spv("managed_categorical_f32", "managed_categorical.comp", base_dict);
+    string_to_spv("managed_sdpa_decode_f32", "managed_sdpa_decode_f32.comp", {});
+    string_to_spv("managed_sdpa_queries_f32", "managed_sdpa_queries_f32.comp", {});
+#ifdef GGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT
+    string_to_spv("managed_q8_0_block_dot_x4", "managed_q8_0_block_dot_x4.comp", {});
+#endif
     string_to_spv("sum_rows_f32", "sum_rows.comp", merge_maps(base_dict, {{"A_TYPE", "float"}, {"D_TYPE", "float"}}));
     string_to_spv("cross_entropy_loss_f32", "cross_entropy_loss.comp", merge_maps(base_dict, {{"A_TYPE", "float"}, {"B_TYPE", "float"}, {"D_TYPE", "float"}}));
     string_to_spv("cross_entropy_loss_back_f32", "cross_entropy_loss_back.comp", merge_maps(base_dict, {{"A_TYPE", "float"}, {"B_TYPE", "float"}, {"D_TYPE", "float"}}));

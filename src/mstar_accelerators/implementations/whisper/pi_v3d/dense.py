@@ -6,9 +6,10 @@ from mstar.model.whisper.config import ATTN, CROSS_ATTN, KV_CACHE, POS, SAMPLER,
 from .graph import _Weights, _attention, _ffn, _linear, _new_graph, _norm
 
 
-def dense_decoder_graph(config: WhisperModelConfig, *, graph=None, sample_tokens=None):
+def dense_decoder_graph(config: WhisperModelConfig, *, graph=None, sample_tokens=None, readout=None, attention=None):
     """One-token decode with direct cache reads and explicit append dependencies."""
     g = graph if graph is not None else _new_graph()
+    attend = _attention if attention is None else attention
     w = _Weights(g, config)
     h = config.d_model
     target, source = config.max_target_positions, config.max_source_positions
@@ -33,7 +34,7 @@ def dense_decoder_graph(config: WhisperModelConfig, *, graph=None, sample_tokens
         # A second input alias of the same allocation would not encode that edge.
         sk = g.set_rows(sk, append, keys)
         sv = g.set_rows(sv, append, values)
-        attended = _attention(g, sq, sk, sv, heads=config.decoder_attention_heads,
+        attended = attend(g, sq, sk, sv, heads=config.decoder_attention_heads,
                               width=h, queries=1, keys=target, mask=self_mask)
         x = g.add(x, _linear(g, w, prefix + ".self_attn.out_proj", attended))
 
@@ -41,14 +42,14 @@ def dense_decoder_graph(config: WhisperModelConfig, *, graph=None, sample_tokens
         cq = _linear(g, w, prefix + ".encoder_attn.q_proj", normalized)
         ck = g.tensor(f"{CROSS_ATTN}.main.read.keys.{i}", (h, source))
         cv = g.tensor(f"{CROSS_ATTN}.main.read.values.{i}", (h, source))
-        attended = _attention(g, cq, ck, cv, heads=config.decoder_attention_heads,
+        attended = attend(g, cq, ck, cv, heads=config.decoder_attention_heads,
                               width=h, queries=1, keys=source, mask=cross_mask)
         x = g.add(x, _linear(g, w, prefix + ".encoder_attn.out_proj", attended))
         x = g.add(x, _ffn(g, w, prefix, _norm(g, w, prefix + ".final_layer_norm", x)))
 
     x = _norm(g, w, "decoder.layer_norm", x)
     last = g.view(x, (h, 1), (4, 4 * h), offset=0)
-    logits = g.mul_mat(w("decoder.proj_out.weight"), last)
+    logits = g.mul_mat(w("decoder.proj_out.weight"), last) if readout is None else readout(g, config, last)
     logits = g.add(logits, g.tensor(f"{SAMPLER}.logit_mask", (config.vocab_size, 1)))
     tokens = g.cast(g.argmax(logits), "i64") if sample_tokens is None else sample_tokens(g, logits, SAMPLER)
     g.output("tokens", tokens)

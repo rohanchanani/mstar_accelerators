@@ -1,5 +1,7 @@
 #include "ggml-vulkan-common.h"
 #include "ggml-vulkan-managed.h"
+#include "managed-sdpa-decode.h"
+#include "managed-sdpa-queries.h"
 
 #include <cstdio>
 #include <cstring>
@@ -50,6 +52,15 @@ void require(bool condition, const char * message) {
     if (!condition) throw std::runtime_error(message);
 }
 
+// Function identity names these actual ggml CUSTOM operations. There is no
+// CPU implementation or arbitrary callback execution in the managed provider.
+void quantize_q8_1_x4_no_cpu(ggml_tensor *, int, int, void *) {
+    GGML_ABORT("managed quantize_q8_1_x4 has no CPU execution path");
+}
+void q8_0_dot_x4_no_cpu(ggml_tensor *, int, int, void *) {
+    GGML_ABORT("managed q8_0_dot_x4 has no CPU execution path");
+}
+
 void check_vk(VkResult result, const char * operation) {
     if (result == VK_ERROR_DEVICE_LOST) {
         managed_error_fatal = true;
@@ -61,6 +72,26 @@ void check_vk(VkResult result, const char * operation) {
         throw std::runtime_error(message);
     }
 }
+
+void sdpa_decode_f32_no_cpu(ggml_tensor *, int, int, void *) {
+    GGML_ABORT("explicit managed SDPA has no CPU execution fallback");
+}
+
+struct sdpa_decode_op_params {
+    ggml_custom_op_params custom;
+    float scale;
+};
+static_assert(sizeof(sdpa_decode_op_params) <= GGML_MAX_OP_PARAMS);
+
+void sdpa_queries_f32_no_cpu(ggml_tensor *, int, int, void *) {
+    GGML_ABORT("explicit managed multi-query SDPA has no CPU execution fallback");
+}
+
+struct sdpa_queries_op_params {
+    ggml_custom_op_params custom;
+    float scale;
+};
+static_assert(sizeof(sdpa_queries_op_params) <= GGML_MAX_OP_PARAMS);
 
 struct tail_state {
     vk_device device;
@@ -136,8 +167,12 @@ std::vector<const ggml_tensor *> validate_graph(ggml_backend_vk_context * ctx, g
         ggml_vk_managed_prepare_pipeline(ctx, node);
     }
     for (const auto * tensor : tensors) {
-        require(tensor->type == GGML_TYPE_F32 || tensor->type == GGML_TYPE_I32 || tensor->type == GGML_TYPE_I64,
-                "managed graph admits F32 and explicit I32/I64 index storage");
+        const bool q8_weight = tensor->type == GGML_TYPE_Q8_0 && tensor->op == GGML_OP_NONE &&
+            !tensor->view_src && ggml_is_matrix(tensor) && ggml_is_contiguous(tensor) &&
+            tensor->ne[0] % 32 == 0 && ggml_nbytes(tensor) % sizeof(int32_t) == 0;
+        require(tensor->type == GGML_TYPE_F32 || tensor->type == GGML_TYPE_I32 ||
+                tensor->type == GGML_TYPE_I64 || q8_weight,
+                "managed graph admits F32, I32/I64 storage and readonly Q8_0 matrix leaves");
         for (int d = 0; d < GGML_MAX_DIMS; ++d) {
             require(tensor->ne[d] > 0 && uint64_t(tensor->ne[d]) <= UINT32_MAX && tensor->nb[d] <= UINT32_MAX,
                     "managed tensor dimensions/strides exceed shader indexing");
@@ -145,6 +180,15 @@ std::vector<const ggml_tensor *> validate_graph(ggml_backend_vk_context * ctx, g
         require(uint64_t(ggml_nelements(tensor)) <= UINT32_MAX &&
                 ggml_nbytes(tensor) <= ctx->device->properties.limits.maxStorageBufferRange,
                 "managed tensor exceeds shader/storage-buffer domain");
+    }
+    for (int i = 0; i < graph->n_nodes; ++i) {
+        const auto * node = graph->nodes[i];
+        for (int j = 0; j < GGML_MAX_SRC; ++j) {
+            if (node->src[j] && node->src[j]->type == GGML_TYPE_Q8_0) {
+                require(j == 0 && ggml_vk_managed_q8_operation(node) == GGML_VK_MANAGED_Q8_0_DOT_X4,
+                        "Q8_0 storage is readonly and only admitted by q8_0_dot_x4");
+            }
+        }
     }
     return tensors;
 }
@@ -170,7 +214,8 @@ binding validate_binding(ggml_backend_vk_context * ctx, const ggml_tensor * t) {
     const uint64_t size = ggml_nbytes(t);
     require(offset <= bc->dev_buffer->size && size <= bc->dev_buffer->size - offset,
             "managed tensor view exceeds its canonical allocation");
-    require(offset % ggml_type_size(t->type) == 0,
+    const uint64_t element_alignment = t->type == GGML_TYPE_Q8_0 ? sizeof(int32_t) : ggml_type_size(t->type);
+    require(offset % element_alignment == 0,
             "managed view offset is not element aligned");
     return {bc->dev_buffer, offset, size};
 }
@@ -203,6 +248,171 @@ int duplicate_fd(int fd) {
 #endif
 
 } // namespace
+
+extern "C" int ggml_vk_managed_q8_operation(const ggml_tensor * node) {
+    if (!node || node->op != GGML_OP_CUSTOM) return GGML_VK_MANAGED_Q8_NONE;
+    ggml_custom_op_params params{};
+    std::memcpy(&params, node->op_params, sizeof(params));
+    if (params.n_tasks != 1 || params.userdata) return GGML_VK_MANAGED_Q8_NONE;
+    if (params.fun == quantize_q8_1_x4_no_cpu) return GGML_VK_MANAGED_QUANTIZE_Q8_1_X4;
+    if (params.fun == q8_0_dot_x4_no_cpu) return GGML_VK_MANAGED_Q8_0_DOT_X4;
+    return GGML_VK_MANAGED_Q8_NONE;
+}
+
+extern "C" bool ggml_vk_managed_q8_metadata_supported(const ggml_tensor * node) {
+    const int kind = ggml_vk_managed_q8_operation(node);
+    const auto * a = node ? node->src[0] : nullptr;
+    if (!a || node->view_src || !ggml_is_contiguous(node)) return false;
+    if (kind == GGML_VK_MANAGED_QUANTIZE_Q8_1_X4) {
+        if (a->type != GGML_TYPE_F32 || !ggml_is_matrix(a) || !ggml_is_contiguous(a) ||
+            a->ne[0] <= 0 || a->ne[0] > UINT32_MAX || a->ne[0] % 32 ||
+            a->ne[1] <= 0 || a->ne[1] > UINT32_MAX) return false;
+        for (int i = 1; i < GGML_MAX_SRC; ++i) if (node->src[i]) return false;
+        const uint64_t count = uint64_t(a->ne[0]) * uint64_t(a->ne[1]);
+        const uint64_t words = ((count + 127) / 128) * 36;
+        return count <= UINT32_MAX && words <= UINT32_MAX && node->type == GGML_TYPE_I32 &&
+            ggml_is_vector(node) && uint64_t(node->ne[0]) == words;
+    }
+    if (kind == GGML_VK_MANAGED_Q8_0_DOT_X4) {
+        const auto * q = node->src[1];
+        if (!q || ggml_vk_managed_q8_operation(q) != GGML_VK_MANAGED_QUANTIZE_Q8_1_X4 ||
+            !ggml_vk_managed_q8_metadata_supported(q) ||
+            a->type != GGML_TYPE_Q8_0 || a->op != GGML_OP_NONE || a->view_src ||
+            !ggml_is_matrix(a) || !ggml_is_contiguous(a) || a->ne[0] <= 0 ||
+            a->ne[0] > UINT32_MAX || a->ne[0] % 32 || a->ne[1] <= 0 || a->ne[1] > UINT32_MAX ||
+            uint64_t(a->ne[0]) * uint64_t(a->ne[1]) > UINT32_MAX ||
+            ggml_nbytes(a) % sizeof(int32_t)) return false;
+        for (int i = 2; i < GGML_MAX_SRC; ++i) if (node->src[i]) return false;
+        const auto * x = q->src[0];
+        return x->ne[0] == a->ne[0] && x->ne[1] >= 1 && x->ne[1] <= 8 &&
+            node->type == GGML_TYPE_F32 && ggml_is_matrix(node) &&
+            node->ne[0] == a->ne[1] && node->ne[1] == x->ne[1] &&
+            uint64_t(node->ne[0]) * uint64_t(node->ne[1]) <= UINT32_MAX;
+    }
+    return false;
+}
+
+extern "C" ggml_tensor * ggml_vk_managed_quantize_q8_1_x4(ggml_context * ctx, ggml_tensor * source) {
+    ggml_tensor * result = nullptr;
+    checked([&] {
+        require(source && source->type == GGML_TYPE_F32 && ggml_is_matrix(source) &&
+                ggml_is_contiguous(source) && source->ne[0] > 0 && source->ne[0] % 32 == 0 &&
+                source->ne[1] > 0 && uint64_t(ggml_nelements(source)) <= UINT32_MAX,
+                "quantize_q8_1_x4 requires a contiguous F32 matrix with K divisible by32");
+        const uint64_t words = ((uint64_t(ggml_nelements(source)) + 127) / 128) * 36;
+        require(words <= UINT32_MAX, "packed Q8_1_x4 extent exceeds shader indexing");
+        ggml_tensor * args[] = {source};
+        result = ggml_custom_4d(ctx, GGML_TYPE_I32, int64_t(words), 1, 1, 1,
+                                args, 1, quantize_q8_1_x4_no_cpu, 1, nullptr);
+        return 0;
+    });
+    return result;
+}
+
+extern "C" ggml_tensor * ggml_vk_managed_q8_0_dot_x4(ggml_context * ctx, ggml_tensor * weights, ggml_tensor * packed) {
+    ggml_tensor * result = nullptr;
+    checked([&] {
+        require(weights && packed && ggml_vk_managed_q8_operation(packed) == GGML_VK_MANAGED_QUANTIZE_Q8_1_X4 &&
+                ggml_vk_managed_q8_metadata_supported(packed) &&
+                weights->type == GGML_TYPE_Q8_0 && weights->op == GGML_OP_NONE && !weights->view_src &&
+                ggml_is_matrix(weights) && ggml_is_contiguous(weights) && weights->ne[0] % 32 == 0 &&
+                weights->ne[1] > 0 && weights->ne[1] <= UINT32_MAX &&
+                uint64_t(weights->ne[0]) * uint64_t(weights->ne[1]) <= UINT32_MAX &&
+                ggml_nbytes(weights) % sizeof(int32_t) == 0 &&
+                packed->src[0]->ne[0] == weights->ne[0] && packed->src[0]->ne[1] <= 8 &&
+                uint64_t(weights->ne[1]) * uint64_t(packed->src[0]->ne[1]) <= UINT32_MAX,
+                "q8_0_dot_x4 requires standard Q8_0 constant and matching packed producer, N<=8");
+        ggml_tensor * args[] = {weights, packed};
+        result = ggml_custom_4d(ctx, GGML_TYPE_F32, weights->ne[1], packed->src[0]->ne[1], 1, 1,
+                                args, 2, q8_0_dot_x4_no_cpu, 1, nullptr);
+        return 0;
+    });
+    return result;
+}
+
+extern "C" bool ggml_vk_managed_sdpa_decode_metadata(const ggml_tensor * node, float * scale) {
+    if (!node || node->op != GGML_OP_CUSTOM) return false;
+    sdpa_decode_op_params params{};
+    std::memcpy(&params, node->op_params, sizeof(params));
+    if (params.custom.fun != sdpa_decode_f32_no_cpu || params.custom.n_tasks != 1 ||
+        params.custom.userdata) return false;
+    for (int i = 4; i < GGML_MAX_SRC; ++i) if (node->src[i]) return false;
+    managed_sdpa_decode::Parameters pc{};
+    if (!managed_sdpa_decode::metadata(node->src[0], node->src[1], node->src[2], node->src[3],
+                                       node, params.scale, pc)) return false;
+    if (scale) *scale = params.scale;
+    return true;
+}
+
+extern "C" ggml_tensor * ggml_vk_managed_sdpa_decode_f32(ggml_context * ctx, ggml_tensor * q,
+        ggml_tensor * k, ggml_tensor * v, ggml_tensor * mask, float scale) {
+    ggml_tensor * result = nullptr;
+    checked([&] {
+        require(q && q->ne[1] > 0 && uint64_t(q->ne[1]) <= UINT32_MAX &&
+                q->ne[3] >= 1 && q->ne[3] <= 2, "SDPA requires a bounded query shape");
+        // Validate a shape-only output before constructing any graph metadata.
+        ggml_tensor output{};
+        output.type = GGML_TYPE_F32;
+        output.ne[0] = 64; output.ne[1] = q->ne[1]; output.ne[2] = 1; output.ne[3] = q->ne[3];
+        output.nb[0] = 4; output.nb[1] = 256;
+        output.nb[2] = output.nb[3] = uint64_t(q->ne[1]) * 256;
+        managed_sdpa_decode::Parameters pc{};
+        require(managed_sdpa_decode::metadata(q, k, v, mask, &output, scale, pc),
+                "SDPA requires F32 Q/out[64,H,1,B], token-major K/V[64,H,T,B], mask[T,1,1,B or1], T<=1536 B<=2");
+        ggml_tensor * args[] = {q, k, v, mask};
+        result = ggml_custom_4d(ctx, GGML_TYPE_F32, 64, q->ne[1], 1, q->ne[3],
+                                args, 4, sdpa_decode_f32_no_cpu, 1, nullptr);
+        sdpa_decode_op_params params{};
+        std::memcpy(&params.custom, result->op_params, sizeof(params.custom));
+        params.scale = scale;
+        std::memcpy(result->op_params, &params, sizeof(params));
+        require(ggml_vk_managed_sdpa_decode_metadata(result, nullptr), "invalid constructed SDPA metadata");
+        return 0;
+    });
+    return result;
+}
+extern "C" bool ggml_vk_managed_sdpa_queries_metadata(const ggml_tensor * node, float * scale) {
+    if (!node || node->op != GGML_OP_CUSTOM) return false;
+    sdpa_queries_op_params params{};
+    std::memcpy(&params, node->op_params, sizeof(params));
+    if (params.custom.fun != sdpa_queries_f32_no_cpu || params.custom.n_tasks != 1 ||
+        params.custom.userdata) return false;
+    for (int i = 4; i < GGML_MAX_SRC; ++i) if (node->src[i]) return false;
+    managed_sdpa_queries::Parameters pc{};
+    if (!managed_sdpa_queries::metadata(node->src[0], node->src[1], node->src[2], node->src[3],
+                                       node, params.scale, pc)) return false;
+    if (scale) *scale = params.scale;
+    return true;
+}
+
+extern "C" ggml_tensor * ggml_vk_managed_sdpa_queries_f32(ggml_context * ctx, ggml_tensor * q,
+        ggml_tensor * k, ggml_tensor * v, ggml_tensor * mask, float scale) {
+    ggml_tensor * result = nullptr;
+    checked([&] {
+        require(q && q->ne[1] > 0 && uint64_t(q->ne[1]) <= UINT32_MAX &&
+                q->ne[2] >= 1 && q->ne[2] <= 4 && q->ne[3] >= 1 && q->ne[3] <= 2, "SDPA requires a bounded query shape");
+        // Validate a shape-only output before constructing any graph metadata.
+        ggml_tensor output{};
+        output.type = GGML_TYPE_F32;
+        output.ne[0] = 64; output.ne[1] = q->ne[1]; output.ne[2] = q->ne[2]; output.ne[3] = q->ne[3];
+        output.nb[0] = 4; output.nb[1] = 256;
+        output.nb[2] = uint64_t(q->ne[1]) * 256;
+        output.nb[3] = uint64_t(q->ne[2]) * output.nb[2];
+        managed_sdpa_queries::Parameters pc{};
+        require(managed_sdpa_queries::metadata(q, k, v, mask, &output, scale, pc),
+                "SDPA requires F32 Q/out[64,H,Q,B], token-major K/V[64,H,T,B], mask[T,Q or1,1,B or1], Q<=4 T<=1536 B<=2");
+        ggml_tensor * args[] = {q, k, v, mask};
+        result = ggml_custom_4d(ctx, GGML_TYPE_F32, 64, q->ne[1], q->ne[2], q->ne[3],
+                                args, 4, sdpa_queries_f32_no_cpu, 1, nullptr);
+        sdpa_queries_op_params params{};
+        std::memcpy(&params.custom, result->op_params, sizeof(params.custom));
+        params.scale = scale;
+        std::memcpy(result->op_params, &params, sizeof(params));
+        require(ggml_vk_managed_sdpa_queries_metadata(result, nullptr), "invalid constructed SDPA metadata");
+        return 0;
+    });
+    return result;
+}
 
 struct ggml_vk_managed_tail {
     std::shared_ptr<tail_state> state;
@@ -240,6 +450,31 @@ bool ggml_vk_managed_record_submission(vk_context & ctx, vk::Fence fence) {
 
 bool ggml_vk_managed_is_recording(const ggml_backend_vk_context * ctx) {
     return active_recording && (!ctx || active_recording->ctx == ctx);
+}
+
+extern "C" int ggml_vk_managed_supports_sdpa_decode_f32(
+        ggml_vk_managed_t managed, const ggml_tensor * node, int * supported) {
+    return checked([&] {
+        std::lock_guard<std::mutex> metadata_guard(managed_metadata_mutex);
+        require(managed && !managed->broken && !managed->active && supported,
+                "SDPA capability query requires an inactive managed context");
+        require(ggml_vk_managed_sdpa_decode_metadata(node, nullptr), "invalid SDPA capability metadata");
+        auto * ctx = static_cast<ggml_backend_vk_context *>(managed->backend->context);
+        *supported = ggml_vk_managed_sdpa_decode_capable(ctx, node) ? 1 : 0;
+        return 0;
+    });
+}
+extern "C" int ggml_vk_managed_supports_sdpa_queries_f32(
+        ggml_vk_managed_t managed, const ggml_tensor * node, int * supported) {
+    return checked([&] {
+        std::lock_guard<std::mutex> metadata_guard(managed_metadata_mutex);
+        require(managed && !managed->broken && !managed->active && supported,
+                "SDPA capability query requires an inactive managed context");
+        require(ggml_vk_managed_sdpa_queries_metadata(node, nullptr), "invalid SDPA capability metadata");
+        auto * ctx = static_cast<ggml_backend_vk_context *>(managed->backend->context);
+        *supported = ggml_vk_managed_sdpa_queries_capable(ctx, node) ? 1 : 0;
+        return 0;
+    });
 }
 
 extern "C" const char * ggml_vk_managed_last_error(void) { return managed_error; }
@@ -469,14 +704,32 @@ extern "C" int ggml_vk_managed_submit(
         for (const auto * tensor : managed->tensors) bindings.push_back(validate_binding(ctx, tensor));
         for (int i = 0; i < graph->n_nodes; ++i) {
             const auto * node = graph->nodes[i];
-            if (node->op == GGML_OP_MUL_MAT) {
-                const auto a = validate_binding(ctx, node->src[0]);
-                const auto b = validate_binding(ctx, node->src[1]);
+            if (node->op == GGML_OP_CUSTOM) {
+                const auto q8_kind = ggml_vk_managed_q8_operation(node);
+                require(q8_kind != GGML_VK_MANAGED_Q8_NONE ? ggml_vk_managed_q8_metadata_supported(node) :
+                        (ggml_vk_managed_sdpa_decode_metadata(node, nullptr) ||
+                         ggml_vk_managed_sdpa_queries_metadata(node, nullptr)), "unknown/invalid managed CUSTOM identity");
                 const auto d = validate_binding(ctx, node);
                 const auto alignment = ctx->device->properties.limits.minStorageBufferOffsetAlignment;
-                require(a.offset % alignment == 0 && b.offset % alignment == 0 && d.offset % alignment == 0,
+                require(d.offset % alignment == 0, "CUSTOM output is not storage-buffer aligned");
+                for (const auto * src : node->src) if (src) {
+                    const auto a = validate_binding(ctx, src);
+                    require(a.offset % alignment == 0 && !overlaps(d, a),
+                            "CUSTOM input alignment or canonical output overlap violation");
+                }
+            }
+            if (node->op == GGML_OP_MUL_MAT) {
+                const auto a = validate_binding(ctx, node->src[0]);
+                const auto d = validate_binding(ctx, node);
+                const auto alignment = ctx->device->properties.limits.minStorageBufferOffsetAlignment;
+                require(a.offset % alignment == 0 && d.offset % alignment == 0,
                         "managed matrix view is not storage-buffer aligned");
-                require(!overlaps(d, a) && !overlaps(d, b), "managed matrix output aliases a live input");
+                require(!overlaps(d, a), "managed kernel output aliases a live input");
+                if (node->src[1]) {
+                    const auto b = validate_binding(ctx, node->src[1]);
+                    require(b.offset % alignment == 0 && !overlaps(d, b),
+                            "managed kernel input alignment or output alias violation");
+                }
             }
         }
         require(dependency_fd >= -1, "invalid incoming dependency descriptor");

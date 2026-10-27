@@ -55,6 +55,21 @@ operator policy requires zero backend-only scratch; all graph intermediates are
 in the supplied canonical arena. Adding a scratch-requiring path extends
 preparation and binding, rather than allowing execution to allocate hidden BOs.
 
+The optional explicit quantized path binds a `Graph.tensor(..., dtype="q8_0")`
+only as a prepared readonly constant. Its real ggml dimensions describe standard
+34-byte Q8_0 blocks of 32 values; the physical Torch value is a flat contiguous
+I32 byte container with exactly the same extent. Other arithmetic and views of
+that constant reject. `quantize_q8_1_x4` consumes a contiguous F32 matrix with K
+divisible by 32 and produces a canonical I32 arena intermediate. Its layout is
+144 bytes per 128 values: four FP16 `(delta, sum)` pairs, then their int8 values.
+This differs from ordinary interleaved GGML Q8_1 storage. `q8_0_dot_x4` requires
+that exact producer, matching K and 1 through 8 columns, and returns F32 using
+the existing packed integer dot shader and F32 scaling/reduction. These are
+identified real ggml CUSTOM operations; unknown callbacks reject. They allocate
+no backend scratch and use the existing slot, range barriers, tail and lifetime
+owners. Quantized operands and FP16 scale fields are explicit approximations;
+model qualification retains its original F32 reference and numerical policy.
+
 Managed im2col explicitly selects the ordinary storage-buffer shader even on a
 device capable of buffer device addresses. Canonical imports do not acquire an
 unadvertised device-address allocation contract. Managed norm, GELU, copy,

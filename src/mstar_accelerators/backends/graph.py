@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol
+import os
 
 import torch
 from mstar.engine.resources.attn.config import AttentionSpec, CrossAttentionSpec
@@ -332,5 +333,12 @@ class NativeGraphProvider:
             return graph
 
         program = prepare_graph(factory, constants, slots=slots)
+        if os.environ.get("MSTAR_ACCELERATORS_GRAPH_DIAGNOSTICS") == "1":
+            import json
+            import logging
+            logging.getLogger(__name__).warning("%s", json.dumps({
+                "event": "native_graph_prepared", "graph": info,
+                "native_program": program.info(),
+            }, sort_keys=True))
         return _NativeProgram(program, tuple(name for name in info["inputs"] if name not in constants),
                               tuple(info["outputs"]))

@@ -6,11 +6,10 @@ semantics through the existing `PrivateUse1` tensor/stream/event interfaces.
 Native programs and the pinned ggml Vulkan provider consume canonical allocations
 and join the same completion model. There is no CPU compute fallback.
 
-The accepted Stage 1 and Stage 2 normal-path target results are the baseline.
-The complete managed graph provider and its Whisper consumers are a new source
-candidate. Host compilation, graph construction and shader inspection are useful
-checks; they do not substitute for the accompanying target recipe or establish
-Whisper accuracy, performance, physical overlap, or exceptional kernel recovery.
+Build and qualify the native extension against the retained source. Host
+compilation and shader inspection do not establish target correctness or
+performance. Native conformance, central acceleration qualification and ordinary
+service checks cover distinct boundaries.
 
 ## Ownership
 
@@ -38,7 +37,7 @@ scheduler or a CPU-worker completion workaround.
 Read `docs/CONTRACT.md` for native/Torch ownership and `docs/PROVIDER.md` for the
 submission/tail boundary. `docs/managed_graph_provider.md` describes complete
 prepared graphs, canonical arenas, slot leases, supported operations and gates.
-`docs/categorical.md` specifies Package 2's optional native categorical primitive,
+`docs/categorical.md` specifies the optional native categorical primitive,
 immutable runtime seed/offset binding, exact RNG mapping and separate gates.
 The C boundary is `native/include/mstar_pi/provider.h` and
 `third_party/ggml/include/ggml-vulkan-managed.h`.
@@ -52,8 +51,8 @@ never a serving-time substitute for asynchronous execution.
 
 ## Build outline
 
-Use the delivery recipe for authenticated target identity, the fresh environment,
-exact dependencies, containment and receipts. The build itself remains:
+Use the accepted kernel contract and a matching Torch/compiler environment.
+Build on the target with pinned dependencies and retain the build receipt:
 
 ```sh
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
@@ -67,3 +66,15 @@ CC=gcc CXX=g++ MAX_JOBS=1 python -m pip install --no-build-isolation --no-deps .
 The root build compiles native code, the real ggml shaders and static libraries.
 The native and ggml standard-library ABI must match official Torch 2.9.1. No
 external installed ggml shared library or superseded Pi factory is used.
+
+Before execution, record the actual loaded extension path and hash; an installed
+package version alone does not identify its native operators:
+
+```sh
+python -c 'import hashlib, pathlib, mstar_pi._C as native; p = pathlib.Path(native.__file__); print(p, hashlib.sha256(p.read_bytes()).hexdigest())'
+```
+
+An explicitly selected preserved build must include its matching Python package,
+not just a substituted shared object. Keep its source/build manifest with the
+qualification receipt. Never silently use a stale venv extension when replaying
+a newer GPU implementation.

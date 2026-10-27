@@ -12,6 +12,45 @@ typedef struct ggml_vk_managed * ggml_vk_managed_t;
 typedef struct ggml_vk_managed_tail * ggml_vk_managed_tail_t;
 typedef void (*ggml_vk_managed_before_accept)(void * user);
 
+// Explicit resident quantized operations. Packed Q8_1_x4 is an I32 physical
+// arena value, not ordinary interleaved GGML Q8_1 storage. These builders are
+// metadata-only; unknown CUSTOM callbacks are never admitted or executed.
+enum ggml_vk_managed_q8_operation {
+    GGML_VK_MANAGED_Q8_NONE = 0,
+    GGML_VK_MANAGED_QUANTIZE_Q8_1_X4 = 1,
+    GGML_VK_MANAGED_Q8_0_DOT_X4 = 2,
+};
+GGML_BACKEND_API int ggml_vk_managed_q8_operation(const struct ggml_tensor * node);
+GGML_BACKEND_API struct ggml_tensor * ggml_vk_managed_quantize_q8_1_x4(
+        struct ggml_context * ctx, struct ggml_tensor * source);
+GGML_BACKEND_API struct ggml_tensor * ggml_vk_managed_q8_0_dot_x4(
+        struct ggml_context * ctx, struct ggml_tensor * weights, struct ggml_tensor * packed);
+GGML_BACKEND_API bool ggml_vk_managed_q8_metadata_supported(const struct ggml_tensor * node);
+
+// Explicit bounded single-query F32 attention. Metadata-only CUSTOM identity;
+// Q/out[64,H,1,B], K/V[64,H,T,B], mask[T,1,1,B or1], T<=1536 and B<=2.
+// Exact source views/producers are retained; output is a new canonical value.
+GGML_BACKEND_API struct ggml_tensor * ggml_vk_managed_sdpa_decode_f32(
+        struct ggml_context * ctx, struct ggml_tensor * q, struct ggml_tensor * k,
+        struct ggml_tensor * v, struct ggml_tensor * mask, float scale);
+GGML_BACKEND_API bool ggml_vk_managed_sdpa_decode_metadata(
+        const struct ggml_tensor * node, float * scale);
+// Exact metadata is required. Only unavailable physical/kernel capabilities
+// return supported=0; invalid metadata and operational errors fail normally.
+// Inactive context query: no tensor storage, imports or submissions.
+GGML_BACKEND_API int ggml_vk_managed_supports_sdpa_decode_f32(
+        ggml_vk_managed_t managed, const struct ggml_tensor * node, int * supported);
+
+// Distinct bounded multi-query identity. Q/out[64,H,Q,B], Q<=4;
+// mask[T,Q or1,1,B or1]. Existing single-query ABI is unchanged.
+GGML_BACKEND_API struct ggml_tensor * ggml_vk_managed_sdpa_queries_f32(
+        struct ggml_context * ctx, struct ggml_tensor * q, struct ggml_tensor * k,
+        struct ggml_tensor * v, struct ggml_tensor * mask, float scale);
+GGML_BACKEND_API bool ggml_vk_managed_sdpa_queries_metadata(
+        const struct ggml_tensor * node, float * scale);
+GGML_BACKEND_API int ggml_vk_managed_supports_sdpa_queries_f32(
+        ggml_vk_managed_t managed, const struct ggml_tensor * node, int * supported);
+
 // All fallible entry points report errors through this thread-local string.
 // Integer status: 0 success, 1 not ready/timeout (tail only), -1 error.
 GGML_BACKEND_API const char * ggml_vk_managed_last_error(void);

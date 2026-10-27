@@ -3,11 +3,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import partial
-from mstar_accelerators.backends.graph import GraphProgram, NativeGraphProvider, prepare_graph_programs
+from mstar_accelerators.backends.graph import GraphProgram, prepare_graph_programs
 from mstar.engine.resources.kv.config import KVSpec
 from mstar.engine.resources.sequence import DenseSequenceView
 from mstar_accelerators.backends.graph import dense_graph_bindings, dense_views
 from mstar_accelerators.implementations.whisper.pi_v3d.dense import dense_decoder_graph
+from mstar_accelerators.implementations.whisper.pi_v3d.sdpa import decode_attention
 from mstar.engine.resources.sampler.plan import SamplingPlan
 from mstar.engine.resources.sequence_view import AttentionUse
 from mstar.engine.resources.sequence_view import SequenceUse
@@ -15,6 +16,7 @@ from mstar.model.whisper.results import DecoderResult
 from mstar.model.whisper.submodules import WhisperDecoderSubmodule
 from mstar_accelerators import Acceleration, AllRows, Eq, Implementation, When
 from mstar_accelerators.compiler import bind_default_call
+from mstar_accelerators.implementations.whisper.pi_v3d.q8 import Q8ReadoutProvider, q8_readout
 from typing import Literal
 import torch
 
@@ -62,11 +64,13 @@ def resource_requests(binding):
 def prepare(binding, resources):
     defaults = bind_default_call(binding, resources, input_type=Inputs, call_type=Call, plan_type=Plans)
 
+    config = binding.submodule.config
+    attention = decode_attention(config)
     views = dense_views(binding, resources)
     return prepare_graph_programs(
         binding, resources,
-        {"decode": GraphProgram(partial(dense_decoder_graph, binding.submodule.config), slots=2)},
-        provider=NativeGraphProvider(), call_binding=defaults,
+        {"decode": GraphProgram(partial(dense_decoder_graph, config, readout=q8_readout, attention=attention), slots=2)},
+        provider=Q8ReadoutProvider(binding), call_binding=defaults,
         input_bindings=partial(dense_graph_bindings, views=views),
     )
 

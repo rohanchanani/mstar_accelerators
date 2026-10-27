@@ -1,0 +1,57 @@
+#version 450
+#extension GL_EXT_integer_dot_product : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_EXT_control_flow_attributes : enable
+
+// Four independent 16-lane row subgroups/workgroup; one full Q8 block/lane.
+// Narrow physical path: N1, 1<=K/32<=16, exact original packed containers.
+layout(local_size_x=64, local_size_y=1, local_size_z=1) in;
+layout(binding=0) readonly buffer Weights { uint weights[]; };
+layout(binding=1) readonly buffer Packed { uint packed[]; };
+layout(binding=2) writeonly buffer Output { float output_values[]; };
+// Existing vector pipeline descriptor interface includes unused fusion aliases.
+layout(binding=3) readonly buffer Fuse0 { float unused_fuse0[]; };
+layout(binding=4) readonly buffer Fuse1 { float unused_fuse1[]; };
+layout(push_constant) uniform Parameters {
+    uint ncols; uint stride_a; uint stride_b; uint stride_d;
+    uint batch_stride_a; uint batch_stride_b; uint batch_stride_d;
+    uint fusion_flags; uint base_work_group_y;
+    uint ne02; uint ne12; uint broadcast2; uint broadcast3;
+} p;
+
+// Original Q8_0 has 34 bytes/block. Exact four-byte carrier extent requires
+// an even total block count. An even block's final cross-word load therefore
+// has a following block; the last (odd) block's quant words align naturally.
+uint weight_word(uint byte_offset) {
+    const uint index=byte_offset/4;
+    const uint lo=weights[index];
+    if ((byte_offset&2u)==0) return lo;
+    return (lo>>16) | (weights[index+1]<<16);
+}
+
+void main() {
+    const uint row=4*(gl_WorkGroupID.x+gl_NumWorkGroups.x*gl_WorkGroupID.z)+gl_SubgroupID;
+    if (row>=p.stride_d) return; // uniform within this row subgroup; no workgroup barrier
+    const uint block=gl_SubgroupInvocationID;
+    const uint blocks=p.ncols/32;
+    float partial=0.0;
+    if (block<blocks) {
+        const uint a_byte=(row*blocks+block)*34;
+        const uint a_scale_word=weights[a_byte/4];
+        const float da=unpackHalf2x16(a_scale_word)[(a_byte&2u)/2];
+        const uint b_outer=block/4;
+        const uint b_inner=block%4;
+        const float db=unpackHalf2x16(packed[b_outer*36+b_inner]).x;
+        const uint b_quants=b_outer*36+4+b_inner*8;
+        int integer_sum=0;
+        [[unroll]] for (uint i=0; i<8; ++i) {
+            integer_sum += dotPacked4x8EXT(int(weight_word(a_byte+2+4*i)),
+                                          int(packed[b_quants+i]));
+        }
+        // One scale pair per full32-element integer sum, no private dequant.
+        partial=(float(integer_sum)*da)*db;
+    }
+    const float total=subgroupAdd(partial);
+    if (gl_SubgroupInvocationID==0) output_values[row]=total;
+}

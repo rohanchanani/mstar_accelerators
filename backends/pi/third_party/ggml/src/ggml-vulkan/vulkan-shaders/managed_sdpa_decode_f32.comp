@@ -1,0 +1,120 @@
+#version 450
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_EXT_control_flow_attributes : enable
+
+// Explicit bounded F32 Q=1 SDPA. Native preparation must require subgroup16,
+// WG256, >=11264B shared, matching metadata, and exact canonical buffer ranges.
+// K/V retain their producer aliases and token-major owner-selected strides.
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+layout(binding = 0) readonly buffer Q { float q[]; };
+layout(binding = 1) readonly buffer K { float k[]; };
+layout(binding = 2) readonly buffer V { float v[]; };
+layout(binding = 3) readonly buffer Mask { float mask[]; };
+layout(binding = 4) writeonly buffer Out { float out_values[]; };
+
+// Strides are float-element counts. Shape: Q/out[64,H,1,B], K/V[64,H,T,B],
+// mask[T,1,1,B or1]. Scale is applied to QK before adding the original mask.
+layout(push_constant) uniform Parameters {
+    uint heads; uint tokens; uint batches;
+    uint q_head_stride; uint q_batch_stride;
+    uint k_head_stride; uint k_token_stride; uint k_batch_stride;
+    uint v_head_stride; uint v_token_stride; uint v_batch_stride;
+    uint mask_batch_stride;
+    uint out_head_stride; uint out_batch_stride;
+    float scale;
+} p;
+
+shared float probabilities[1536];
+shared float reduction[256];
+shared float value_partials[16 * 64];
+
+void main() {
+    const uint head = gl_WorkGroupID.x;
+    const uint batch = gl_WorkGroupID.y;
+    // These bounds are workgroup-uniform; no lane leaves a live barrier.
+    if (head >= p.heads || batch >= p.batches) return;
+    const uint tid = gl_LocalInvocationIndex;
+    const uint lane = gl_SubgroupInvocationID;
+    const uint token_partition = gl_SubgroupID;
+    const uint feature = lane * 4;
+    const uint qi = batch * p.q_batch_stride + head * p.q_head_stride + feature;
+    const vec4 query = vec4(q[qi], q[qi + 1], q[qi + 2], q[qi + 3]);
+
+    // One subgroup computes one 64-component QK dot. Across this workgroup,
+    // sixteen keys progress independently. No shared barrier is inside the
+    // variable-length key loop. Every physical key and mask element is used;
+    // no valid-length inference, prefix trimming or masked-value shortcut.
+    for (uint token = token_partition; token < p.tokens; token += 16) {
+        const uint ki = batch * p.k_batch_stride + head * p.k_head_stride +
+                        token * p.k_token_stride + feature;
+        const vec4 key = vec4(k[ki], k[ki + 1], k[ki + 2], k[ki + 3]);
+        float partial = 0.0;
+        partial += dot(key, query);
+        const float score = subgroupAdd(partial);
+        if (lane == 0) {
+            probabilities[token] = score * p.scale + mask[batch * p.mask_batch_stride + token];
+        }
+    }
+    barrier();
+
+    // Match the existing managed WG256 softmax's per-lane token order and
+    // power-of-two max/sum trees. Shared scores replace global score/prob BOs.
+    float cache[6];
+    float local_max = uintBitsToFloat(0xff800000u);
+    [[unroll]] for (uint i = 0; i < 6; ++i) {
+        const uint token = tid + i * 256;
+        cache[i] = token < p.tokens ? probabilities[token] : 0.0;
+        if (token < p.tokens) local_max = max(local_max, cache[i]);
+    }
+    reduction[tid] = local_max;
+    barrier();
+    [[unroll]] for (uint width = 128; width > 0; width >>= 1) {
+        if (tid < width) reduction[tid] = max(reduction[tid], reduction[tid + width]);
+        barrier();
+    }
+    const float maximum = reduction[0];
+    barrier(); // Every lane must read maximum before lane0 reuses reduction[0].
+    float local_sum = 0.0;
+    [[unroll]] for (uint i = 0; i < 6; ++i) {
+        if (tid + i * 256 < p.tokens) {
+            cache[i] = exp(cache[i] - maximum);
+            local_sum += cache[i];
+        }
+    }
+    reduction[tid] = local_sum;
+    barrier();
+    [[unroll]] for (uint width = 128; width > 0; width >>= 1) {
+        if (tid < width) reduction[tid] += reduction[tid + width];
+        barrier();
+    }
+    const float inverse_sum = 1.0 / reduction[0];
+    [[unroll]] for (uint i = 0; i < 6; ++i) {
+        const uint token = tid + i * 256;
+        if (token < p.tokens) probabilities[token] = cache[i] * inverse_sum;
+    }
+    barrier();
+
+    // Each subgroup owns all64 feature components over one token token_partition.
+    // Adjacent lanes load adjacent vec4 features from the original V row.
+    // This changes the FP32 value summation tree from the original GEMV;
+    // unchanged primitive/model numerical policy remains the acceptance gate.
+    vec4 accumulator = vec4(0.0);
+    for (uint token = token_partition; token < p.tokens; token += 16) {
+        const uint vi = batch * p.v_batch_stride + head * p.v_head_stride +
+                        token * p.v_token_stride + feature;
+        const vec4 value = vec4(v[vi], v[vi + 1], v[vi + 2], v[vi + 3]);
+        accumulator = fma(vec4(probabilities[token]), value, accumulator);
+    }
+    const uint pi = token_partition * 64 + feature;
+    value_partials[pi] = accumulator.x;
+    value_partials[pi + 1] = accumulator.y;
+    value_partials[pi + 2] = accumulator.z;
+    value_partials[pi + 3] = accumulator.w;
+    barrier();
+    if (tid < 64) {
+        float value = 0.0;
+        [[unroll]] for (uint i = 0; i < 16; ++i) value += value_partials[i * 64 + tid];
+        out_values[batch * p.out_batch_stride + head * p.out_head_stride + tid] = value;
+    }
+}

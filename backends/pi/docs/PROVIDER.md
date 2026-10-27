@@ -108,10 +108,11 @@ foreign acquire, all admitted graph command buffers, and foreign release, and
 signals an independent tail. The provider exports that tail and returns it to
 the native runtime. No intermediate host completion wait is required.
 
-This path deliberately uses the F32 matrix shader for the one-row case as well
-as multiple rows. It does not claim that this is the fastest Pi GEMV. It excludes
-split-K/internal conversion and requires no ggml scratch allocation. That is an
-explicit first preparation policy, not a restriction on future implementations.
+The one-column (`N=1`) case uses the existing resident F32 vector shader;
+multiple columns use the F32 matrix shader. Preparation compiles the same
+selected pipeline that recording later uses. Both paths exclude split-K/internal
+conversion and require no ggml scratch allocation. The vector shader changes the
+F32 reduction order, so target numerical qualification remains required.
 
 The managed path rejects untracked transfer queues, indirect work, deferred
 host copies/memsets, unbound tensors, unsupported layouts/dtypes/graphs, and
