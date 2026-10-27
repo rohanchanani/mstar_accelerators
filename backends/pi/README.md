@@ -64,7 +64,7 @@ CC=gcc CXX=g++ MAX_JOBS=1 python -m pip install --no-build-isolation --no-deps .
 ```
 
 The root build compiles native code, the real ggml shaders and static libraries.
-The native and ggml standard-library ABI must match official Torch 2.9.1. No
+The native and ggml standard-library ABI must match official Torch 2.10.0. No
 external installed ggml shared library or superseded Pi factory is used.
 
 Before execution, record the actual loaded extension path and hash; an installed

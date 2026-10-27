@@ -18,7 +18,7 @@ import mstar_pi
 
 
 def preflight() -> dict:
-    assert torch.__version__.split("+")[0] == "2.9.1"
+    assert torch.__version__.split("+")[0] == "2.10.0"
     assert str(torch.device("mstar_pi:0")) == "mstar_pi:0"
     assert not mstar_pi.is_initialized()
     before = mstar_pi.health()

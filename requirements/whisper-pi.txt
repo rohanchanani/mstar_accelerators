@@ -1,6 +1,6 @@
-# Torch 2.9.1 is installed separately from the official CPU wheel index.
+# Torch 2.10.0 is installed separately from the official CPU wheel index.
 # This is the tested Whisper deployment environment, not every M* model extra.
-# TorchCodec 0.8.1 is built separately on AArch64; see tools/environment/.
+# TorchCodec 0.10.0 is built separately on AArch64; see tools/environment/.
 numpy==2.5.4
 transformers==4.57.3
 huggingface-hub==0.36.2
@@ -17,6 +17,6 @@ soundfile==0.14.0
 einops==0.8.2
 Pillow==13.0.0
 pytest==9.1.1
-setuptools==78.1.0
+setuptools==78.1.1
 wheel==0.45.1
 ninja==1.13.2

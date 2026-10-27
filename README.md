@@ -213,7 +213,7 @@ sampling lifecycle.
 Use editable installations of this repository and the matching M* fork. The
 corpus, deployment templates and tools live in the checkout, not the Python wheel.
 
-- **Pi 5:** the Pi branch's `docs/PI5.md` covers the CPU build, assets,
+- **Pi 5:** [Pi walkthrough](docs/PI5.md) covers the CPU build, assets,
   qualification and ordinary serving. [V3D backend documentation](backends/pi/README.md)
   covers its native execution contract and managed launcher.
 - **AMD MI300X:** [Qwen3-Omni walkthrough](docs/QWEN3_OMNI_AMD.md) covers pinned

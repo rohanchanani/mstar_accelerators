@@ -7,6 +7,14 @@ M* owns worker processes, communication groups, request lifecycle and shutdown.
 CPU Torch callbacks are synchronous. Their collectives use the placement-derived
 groups supplied through `NodeBinding`.
 
+The runtime's `threads` setting applies to the worker process. An optional
+`node_threads: {audio_encoder: 2}` mapping overrides it once during node assembly,
+before weight preparation or execution threads start. Unmapped nodes use
+`threads`. Nodes sharing one worker must request the same count; conflicting
+counts are rejected during assembly. Use M* `node_groups` placement to give nodes
+with different counts separate workers. The runtime logs each node's actual
+thread count and never changes this policy during execution.
+
 ## Generated calls and synchronous programs
 
 An author can use any `PreparedImplementation` callbacks. The optional

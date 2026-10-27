@@ -1,6 +1,6 @@
 # Torch adapter and resident ggml provider
 
-This package exposes the native runtime through Torch 2.9.1's `PrivateUse1`
+This package exposes the native runtime through Torch 2.10.0's `PrivateUse1`
 device, stream/event, storage, and operator interfaces. It is a reusable backend,
 not a model implementation or a replacement worker. The initial operator surface
 is deliberately explicit; unsupported operations have no blanket CPU fallback.
@@ -22,7 +22,7 @@ python -m pip install --no-build-isolation --no-deps ./torch
 `MSTAR_PI_BUILD_DIR` can select an isolated root CMake output directory. It
 changes only the build input, not runtime discovery. The extension links its
 static archive group before the Vulkan and DRM system libraries. `setup.py`
-pins Torch 2.9.1 and derives its include paths, libraries, Python ABI and C++ ABI
+pins Torch 2.10.0 and derives its include paths, libraries, Python ABI and C++ ABI
 from that installed Torch.
 
 `python torch/tests/host_preflight.py` checks actual extension import, dispatcher

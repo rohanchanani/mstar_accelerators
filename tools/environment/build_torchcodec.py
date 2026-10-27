@@ -26,9 +26,9 @@ import time
 import urllib.request
 
 
-COMMIT = "c47b7dfe05aec660938437febc2055e6caedca5b"
+COMMIT = "0b261b98080925f2b709712a5491a1e8dd817065"
 ARCHIVE_URL = f"https://codeload.github.com/meta-pytorch/torchcodec/tar.gz/{COMMIT}"
-ARCHIVE_SHA256 = "08ec47bb7970a3c2ae18b20df6f77275f50d02298fbb0d6a94de5c808158588c"
+ARCHIVE_SHA256 = "a3a6adf464221269a7281a77cf85b37081e5602d7dae526e985849c2487c5831"
 COMPONENTS = ("avdevice", "avfilter", "avformat", "avcodec", "avutil", "swresample", "swscale")
 
 
@@ -141,7 +141,7 @@ class Build:
             info = self.command(["/usr/bin/apt-cache", "show", f"libavcodec-dev={version}"], env=apt_env)
             codec_major = int(re.search(r"libavcodec(\d+)\s*\(=", info)[1])
             if not 58 <= codec_major <= 62:
-                raise RuntimeError(f"Configured repositories selected FFmpeg outside TorchCodec 0.8's 4–8 range: {version}")
+                raise RuntimeError(f"Configured repositories selected FFmpeg outside TorchCodec 0.10's 4–8 range: {version}")
             self.receipt.update(ffmpeg_major=codec_major - 54, ffmpeg_package_version=version)
             requested = [f"lib{x}-dev={version}" for x in COMPONENTS]
             if not shutil.which("pkg-config"):
@@ -232,10 +232,10 @@ class Build:
 
     def build(self, args):
         import torch
-        if torch.__version__.split("+")[0] != "2.9.1":
-            raise RuntimeError(f"This environment recipe is for Torch 2.9.1, found {torch.__version__}")
-        if not (3, 10) <= sys.version_info[:2] <= (3, 13):
-            raise RuntimeError("TorchCodec 0.8 supports Python 3.10–3.13")
+        if torch.__version__.split("+")[0] != "2.10.0":
+            raise RuntimeError(f"This environment recipe is for Torch 2.10.0, found {torch.__version__}")
+        if not (3, 10) <= sys.version_info[:2] <= (3, 14):
+            raise RuntimeError("TorchCodec 0.10 supports Python 3.10–3.14")
         self.receipt["environment"] = {"python": sys.version, "executable": sys.executable,
                                        "machine": platform.machine(), "torch": torch.__version__,
                                        "torch_cxx11_abi": torch.compiled_with_cxx11_abi()}
@@ -247,7 +247,7 @@ class Build:
         # whose compiled-in LIBDIR still names their original install prefix.
         self.env["CMAKE_PREFIX_PATH"] = os.pathsep.join((pybind11.get_cmake_dir(), sys.base_prefix))
         self.env["PATH"] = str(Path(sys.executable).parent) + os.pathsep + self.env.get("PATH", "")
-        archive = self.work / "torchcodec-0.8.1.tar.gz"
+        archive = self.work / "torchcodec-0.10.0.tar.gz"
         if not archive.exists():
             with urllib.request.urlopen(ARCHIVE_URL, timeout=120) as response:
                 archive.write_bytes(response.read())
@@ -259,7 +259,7 @@ class Build:
         tree = self.run / "source" / f"torchcodec-{COMMIT}"
         self.env.pop("BUILD_AGAINST_ALL_FFMPEG_FROM_S3", None)
         self.env.update(
-            BUILD_VERSION="0.8.1", ENABLE_CUDA="OFF", CMAKE_BUILD_TYPE="Release",
+            BUILD_VERSION="0.10.0", ENABLE_CUDA="OFF", CMAKE_BUILD_TYPE="Release",
             CMAKE_BUILD_PARALLEL_LEVEL=str(args.jobs),
             TORCHCODEC_CMAKE_BUILD_DIR=str(self.run / "build"),
             TORCHCODEC_DISABLE_COMPILE_WARNING_AS_ERROR="OFF",

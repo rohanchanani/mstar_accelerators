@@ -15,8 +15,8 @@ from torch.utils.cpp_extension import BuildExtension, CppExtension
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 
-if torch.__version__.split("+")[0] != "2.9.1":
-    raise RuntimeError(f"this source is pinned to Torch 2.9.1, found {torch.__version__}")
+if torch.__version__.split("+")[0] != "2.10.0":
+    raise RuntimeError(f"this source is pinned to Torch 2.10.0, found {torch.__version__}")
 
 build_dir = Path(os.environ.get("MSTAR_PI_BUILD_DIR", ROOT / "build")).resolve()
 static_libraries = [build_dir / "lib" / f"lib{name}.a" for name in (
@@ -54,5 +54,5 @@ setup(
     )],
     cmdclass={"build_ext": BuildExtension},
     python_requires=">=3.11",
-    install_requires=["torch==2.9.1"],
+    install_requires=["torch==2.10.0"],
 )

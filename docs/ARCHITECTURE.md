@@ -223,6 +223,14 @@ Scratch arenas remain leased by accepted work. Returning a scratch view does
 not turn it into a durable result; the first programs write their results to
 fresh caller-owned tensors and write persistent KV only through planned views.
 
+The CPU combined decoder shares one `WorkspaceCapacity` across prefill and decode
+programs because they use the same native scratch. Each program tracks its own
+leases; closing it cannot close a sibling's capacity. The last prepared-body
+reference closes the shared capacity before destroying the native handle, then
+drops borrowed storage references only after native destruction succeeds. A busy
+or failed close retains ownership for drain/retry; it is not permission to free
+buffers.
+
 The Pi backend joins provider work into the current Torch stream before return.
 The worker records and consumes its existing Torch event, stages CPU outputs
 where required and observes them only at the established read boundary. This is

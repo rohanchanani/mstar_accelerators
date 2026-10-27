@@ -7,20 +7,22 @@ ordinary audio-file input path.
 
 ## Why this is a source build
 
-The official TorchCodec 0.8 compatibility table identifies Torch 2.9 and Python
-3.10–3.13. Inspection of both the official CPU wheel index and complete wheel
-index found no Linux AArch64 CPython 3.13 wheel for either 0.8.0 or 0.8.1. PyPI
-0.8.1 supplies no source distribution either. The pinned upstream CPU build is
-portable C++17, uses the installed Torch package, and dynamically links FFmpeg
-4–8 discovered through pkg-config. No source architecture blocker was found;
-an AArch64 build and execution must still be observed on the Pi.
+The upstream M* dependency floor requires Torch 2.10 or newer. This Pi recipe
+pairs Torch 2.10.0 with TorchCodec 0.10.0, following the upstream compatibility
+table. The frozen Torch 2.9.1 / TorchCodec 0.8.1 environment remains a separate
+behavior control; do not upgrade it in place. The candidate environment and
+native Torch adapter must be rebuilt and qualified before claiming parity.
+
+The pinned CPU source build uses the installed Torch package and dynamically
+links FFmpeg 4–8 discovered through pkg-config. No system package replacement or
+fallback decoder is required by this recipe.
 
 Pinned source:
 
-- Version: `0.8.1`.
-- Official tag commit: `c47b7dfe05aec660938437febc2055e6caedca5b`.
-- Archive: <https://codeload.github.com/meta-pytorch/torchcodec/tar.gz/c47b7dfe05aec660938437febc2055e6caedca5b>.
-- Archive SHA256: `08ec47bb7970a3c2ae18b20df6f77275f50d02298fbb0d6a94de5c808158588c`.
+- Version: `0.10.0`.
+- Official tag commit: `0b261b98080925f2b709712a5491a1e8dd817065`.
+- Archive: <https://codeload.github.com/meta-pytorch/torchcodec/tar.gz/0b261b98080925f2b709712a5491a1e8dd817065>.
+- Archive SHA256: `a3a6adf464221269a7281a77cf85b37081e5602d7dae526e985849c2487c5831`.
 - Source compatibility and build instructions: `README.md`, `CONTRIBUTING.md`,
   `setup.py`, and `src/torchcodec/_core/CMakeLists.txt` in that archive.
 - Wheel indexes: <https://download.pytorch.org/whl/cpu/torchcodec/> and
@@ -32,7 +34,7 @@ ordinary local-FFmpeg CPU path, without changing upstream source.
 
 ## Run on the Pi before model/API gates
 
-Use the fresh candidate environment containing official AArch64 Torch 2.9.1
+Use the fresh candidate environment containing official AArch64 Torch 2.10.0
 and the candidate's Python requirements. The compiler, Python development
 headers, APT tools and Debian/Pi signature keyrings come from the established
 machine environment. This command performs no privileged operation and does
@@ -110,7 +112,7 @@ python tools/environment/verify_torchcodec.py \
   --spawn
 ```
 
-The expected records are `PASS` for `parent` and `spawn`, Torch `2.9.1`,
-TorchCodec `0.8.1`, 16 kHz, one channel and identical PCM hashes. Actual target
+The expected records are `PASS` for `parent` and `spawn`, Torch `2.10.0`,
+TorchCodec `0.10.0`, 16 kHz, one channel and identical PCM hashes. Actual target
 build/import/decoding receipts are required before the complete M* API demo.
 This check establishes audio input handling, not Pi GPU execution or speed.

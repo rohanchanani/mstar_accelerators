@@ -1,4 +1,4 @@
-// Torch 2.9.1 adapter. Native handles stay behind mstar_pi/runtime.h.
+// Torch 2.10 adapter. Native handles stay behind mstar_pi/runtime.h.
 #include <mstar_pi/runtime.h>
 #include "native_binding.h"
 
